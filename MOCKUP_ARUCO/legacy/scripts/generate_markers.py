@@ -2,12 +2,12 @@
 scripts/generate_markers.py
 ----------------------------
 Genera las imágenes PNG de los marcadores ArUco definidos en warehouse_config.json
-y las guarda en assets/markers/png/.
+y las guarda en assets/warehouse_markers/png/.
 
 Uso:
     python scripts/generate_markers.py
     python scripts/generate_markers.py --config config/warehouse_config.json
-                                        --output assets/markers/png
+                                        --output assets/warehouse_markers/png
                                         --dpi 300 --size-cm 15
 """
 
@@ -103,7 +103,7 @@ def main():
     )
     parser.add_argument("--config",   default="config/warehouse_config.json",
                         help="Ruta al archivo de configuración del almacén")
-    parser.add_argument("--output",   default="assets/markers/png",
+    parser.add_argument("--output",   default="assets/warehouse_markers/png",
                         help="Directorio de salida para las imágenes")
     parser.add_argument("--dpi",      type=int,   default=300,
                         help="Resolución de impresión en DPI (default 300)")

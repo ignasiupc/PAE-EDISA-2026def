@@ -12,14 +12,14 @@ Instrucciones:
      Ajusta SQUARE_SIZE abajo.
 
   3. Ejecuta este script:
-         python examples/calibration/calibrar_camara.py
+         python calibration/calibrar_camara.py
 
   4. Mueve el tablero delante de la cámara en distintas posiciones y ángulos.
      Pulsa ESPACIO para capturar una imagen (mínimo 15, recomendable 20-30).
      Intenta cubrir toda la imagen: centro, esquinas, rotado, inclinado.
 
   5. Pulsa 'q' cuando tengas suficientes capturas.
-     El script calibra y guarda el resultado en examples/config/camera_calibration.json
+     El script calibra y guarda el resultado en config/camera_calibration.json
 
   6. Copia los valores de camera_matrix y dist_coeffs a tu AppConfig en detector_3d.py
 
