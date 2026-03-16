@@ -37,6 +37,8 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import matplotlib.patches as mpatches
 
+BASE_DIR = Path(__file__).resolve().parent
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN Y TIPOS
@@ -74,7 +76,7 @@ class AppConfig:
     """Configuración global de la aplicación."""
     video_source: int = 0
     aruco_dict: int = cv2.aruco.DICT_4X4_1000
-    config_path: str = "config/markers_3d.json"
+    config_path: str = str(BASE_DIR / "config" / "markers_3d.json")
 
     # Intrínsecos (calibrados — reproyección 0.22px)
     camera_matrix: np.ndarray = field(default_factory=lambda: np.array([

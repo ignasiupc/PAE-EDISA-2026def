@@ -12,14 +12,14 @@ Instrucciones:
      Ajusta SQUARE_SIZE abajo.
 
   3. Ejecuta este script:
-         python calibrar_camara.py
+         python examples/calibration/calibrar_camara.py
 
   4. Mueve el tablero delante de la cámara en distintas posiciones y ángulos.
      Pulsa ESPACIO para capturar una imagen (mínimo 15, recomendable 20-30).
      Intenta cubrir toda la imagen: centro, esquinas, rotado, inclinado.
 
   5. Pulsa 'q' cuando tengas suficientes capturas.
-     El script calibra y guarda el resultado en config/camera_calibration.json
+     El script calibra y guarda el resultado en examples/config/camera_calibration.json
 
   6. Copia los valores de camera_matrix y dist_coeffs a tu AppConfig en detector_3d.py
 
@@ -30,8 +30,8 @@ Dependencias:
 import cv2
 import numpy as np
 import json
-import os
 from datetime import datetime
+from pathlib import Path
 
 
 # ─── CONFIGURACIÓN ────────────────────────────────────────────────────────────
@@ -51,8 +51,9 @@ VIDEO_SOURCE = 0
 MIN_CAPTURAS = 15
 
 # Directorio de salida
-OUTPUT_DIR = "config"
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "camera_calibration.json")
+BASE_DIR = Path(__file__).resolve().parents[1]
+OUTPUT_DIR = BASE_DIR / "config"
+OUTPUT_FILE = OUTPUT_DIR / "camera_calibration.json"
 
 
 # ─── FUNCIONES ────────────────────────────────────────────────────────────────
@@ -199,7 +200,7 @@ def calibrar(obj_points, img_points, img_size):
 
 def guardar_calibracion(camera_matrix, dist_coeffs, mean_err, img_size):
     """Guarda la calibración en JSON."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     data = {
         "calibration_date": datetime.now().isoformat(),
