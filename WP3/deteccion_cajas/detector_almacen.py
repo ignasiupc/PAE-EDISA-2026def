@@ -30,7 +30,7 @@ WEIGHTS_PATH = "weights/groundingdino_swint_ogc.pth"
 
 # --- Carpeta con tus imágenes del almacén ---
 # Puede ser una sola imagen o una carpeta entera
-INPUT_PATH   = "mis_imagenes/"   # carpeta o ruta a un archivo .jpg/.png
+INPUT_PATH   = "../fotos_caixa/"   # carpeta o ruta a un archivo .jpg/.png
 
 # --- Carpeta donde se guardan los resultados ---
 OUTPUT_DIR   = "resultados/"
