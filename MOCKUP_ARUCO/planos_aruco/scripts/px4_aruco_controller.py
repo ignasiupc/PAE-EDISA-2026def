@@ -90,14 +90,21 @@ class PX4ArucoDroneController:
 
             for marker in detected:
                 shelf = marker['shelf']
+                floor = marker['floor']
+                shelf_floor = marker['shelf_floor']
                 position = marker['position']
-                print(f"Marcador detectado: {shelf} (ID {marker['id']}) en posición {position}")
+                print(f"Marcador detectado: {shelf_floor} (ID {marker['id']}) en posición {position}")
 
-                # Si es el waypoint actual, tomar foto
+                # Tomar una foto la primera vez que se detecta este ID
+                if shelf_floor not in self.detected_markers:
+                    await self.take_photo_and_report(frame, shelf_floor, position, self.flight_sequence[self.current_waypoint]['position'])
+                    self.detected_markers[shelf_floor] = True
+
+                # Avanzar al siguiente waypoint si coincide con el actual
                 if self.current_waypoint < len(self.flight_sequence):
                     current_wp = self.flight_sequence[self.current_waypoint]
-                    if current_wp['shelf'] == shelf:
-                        await self.take_photo_and_report(frame, shelf, position)
+                    if current_wp['shelf_floor'] == shelf_floor:
+                        self.current_waypoint += 1
 
             cv2.imshow('PX4 ArUco Detection', frame)
 
@@ -118,12 +125,20 @@ class PX4ArucoDroneController:
             detected = []
             for i, marker_id in enumerate(ids.flatten()):
                 if marker_id in self.config['assignments'].values():
-                    shelf = [k for k, v in self.config['assignments'].items() if v == marker_id][0]
+                    # Obtener la clave (E1-P0, E2-P3, etc.)
+                    shelf_floor = [k for k, v in self.config['assignments'].items() if v == marker_id][0]
+                    # Separar estantería y piso
+                    parts = shelf_floor.split('-')
+                    shelf = parts[0]  # E1, E2, etc.
+                    floor = parts[1]  # P0, P1, etc.
+                    
                     position = tvecs[i].flatten()
                     rotation = rvecs[i].flatten()
 
                     detected.append({
                         'shelf': shelf,
+                        'floor': floor,
+                        'shelf_floor': shelf_floor,
                         'id': marker_id,
                         'position': position.tolist(),
                         'rotation': rotation.tolist()
@@ -136,35 +151,29 @@ class PX4ArucoDroneController:
             return detected
         return []
 
-    async def take_photo_and_report(self, frame, shelf, aruco_position):
+    async def take_photo_and_report(self, frame, shelf_floor, aruco_position, waypoint_position):
         """Toma foto y reporta posición al sistema."""
-        # Tomar foto
-        filename = f"photos/{shelf}_{int(time.time())}.jpg"
+        filename = f"photos/{shelf_floor}_{int(time.time())}.jpg"
         cv2.imwrite(filename, frame)
         print(f"Foto tomada: {filename}")
 
-        # Obtener posición GPS del dron
-        async for position in self.drone.telemetry.position():
-            gps_position = {
-                'latitude': position.latitude_deg,
-                'longitude': position.longitude_deg,
-                'altitude': position.relative_altitude_m
-            }
-            break
+        # Usar coordenadas del waypoint (sin GPS)
+        local_position = {
+            'x': waypoint_position[0],
+            'y': waypoint_position[1],
+            'z': waypoint_position[2]
+        }
 
         # Reportar datos (aquí podrías enviar a un servidor o base de datos)
         report = {
-            'shelf': shelf,
+            'shelf_floor': shelf_floor,
             'timestamp': time.time(),
-            'gps_position': gps_position,
+            'local_position': local_position,
             'aruco_position': aruco_position,
             'photo_path': filename
         }
 
         print(f"Reporte generado: {report}")
-
-        # Avanzar al siguiente waypoint
-        self.current_waypoint += 1
 
     async def run(self):
         """Ejecuta el sistema completo."""

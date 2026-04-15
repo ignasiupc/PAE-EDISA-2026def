@@ -1,4 +1,3 @@
-opencv-python
-numpy
-json
-mavsdk
+opencv-contrib-python>=4.8.0
+numpy>=1.26.0
+mavsdk>=0.53.0
