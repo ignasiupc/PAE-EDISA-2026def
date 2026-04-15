@@ -41,12 +41,15 @@ class DroneArucoDetector:
             detected = []
             for i, marker_id in enumerate(ids.flatten()):
                 if marker_id in self.config['assignments'].values():
-                    shelf = [k for k, v in self.config['assignments'].items() if v == marker_id][0]
+                    shelf_floor = [k for k, v in self.config['assignments'].items() if v == marker_id][0]
+                    shelf, floor = shelf_floor.split('-')
                     position = tvecs[i].flatten()
                     rotation = rvecs[i].flatten()
 
                     detected.append({
                         'shelf': shelf,
+                        'floor': floor,
+                        'shelf_floor': shelf_floor,
                         'id': marker_id,
                         'position': position.tolist(),
                         'rotation': rotation.tolist()
@@ -95,15 +98,19 @@ class DroneArucoDetector:
             detected = self.detect_markers(frame)
 
             for marker in detected:
-                shelf = marker['shelf']
+                shelf_floor = marker['shelf_floor']
                 position = marker['position']
-                print(f"Marcador detectado: {shelf} (ID {marker['id']}) en posición {position}")
+                print(f"Marcador detectado: {shelf_floor} (ID {marker['id']}) en posición {position}")
 
-                # Si es el waypoint actual, tomar foto y avanzar
+                # Tomar una foto la primera vez que se detecta este ID
+                if shelf_floor not in self.detected_markers:
+                    self.take_photo(frame, shelf_floor)
+                    self.detected_markers[shelf_floor] = True
+
+                # Avanzar al siguiente waypoint si coincide con el actual
                 if self.current_waypoint < len(self.flight_sequence):
                     current_wp = self.flight_sequence[self.current_waypoint]
-                    if current_wp['shelf'] == shelf:
-                        self.take_photo(frame, shelf)
+                    if current_wp['shelf_floor'] == shelf_floor:
                         self.navigate_to_next_waypoint()
 
             cv2.imshow('Drone ArUco Detection', frame)
