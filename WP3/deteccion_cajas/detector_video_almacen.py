@@ -53,11 +53,11 @@ TEXT_PROMPT = "cardboard box . box . carton . stacked cardboard box . warehouse 
 BOX_THRESHOLD         = 0.19
 TEXT_THRESHOLD        = 0.3
 IOU_THRESHOLD         = 0.7
-CONTAINMENT_THRESHOLD = 0.5   # Actualizado según código 1
+CONTAINMENT_THRESHOLD = 0.5   
 CENTER_DIST_THRESHOLD = 0.05
 
 # FILTROS DE TAMAÑO Y FORMA
-MIN_BOX_SIZE          = 0.06  # Actualizado según código 1
+MIN_BOX_SIZE          = 0.06  
 MAX_BOX_ASPECT_RATIO  = 2.2
 
 # DETECCIÓN DE VIGAS NARANJAS
@@ -65,7 +65,7 @@ BEAM_HSV_LOW          = np.array([8, 150, 120])
 BEAM_HSV_HIGH         = np.array([18, 255, 255])
 BEAM_ROW_THRESHOLD    = 0.25
 BEAM_MIN_HEIGHT_PX    = 10
-BEAM_PALLET_RATIO     = 0.18  # Actualizado según código 1
+BEAM_PALLET_RATIO     = 0.18  
 
 PALLET_KEYWORDS       = {"pallet"}
 PALLET_MIN_ASPECT_RATIO = 2.5
