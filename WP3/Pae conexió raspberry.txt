@@ -9,3 +9,5 @@ ssh pi@172.20.10.3
 --Enviar video--
 
 rpicam-vid -t 0 --codec mjpeg --width 640 --height 480 --framerate 15 --listen -o tcp://0.0.0.0:8888
+
+rpicam-vid -t 0 --codec mjpeg --width 1920 --height 1080 --framerate 24 --listen -o tcp://0.0.0.0:8888
