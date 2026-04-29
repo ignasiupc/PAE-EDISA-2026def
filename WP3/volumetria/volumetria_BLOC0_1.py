@@ -26,7 +26,7 @@ MANIFEST_CSV = "etiquetes_magatzem_simulades_manifest.csv"
 # CONFIGURACIÓ DE CAPTURA DE VÍDEO
 # ==========================================
 GRAVAR_NOU_VIDEO = True        
-FONT_VIDEO = 0                  
+FONT_VIDEO = "tcp://172.20.10.2:8888"                 
 INTERVAL_CAPTURA_SEG = 1.0      
 # ==========================================
 
