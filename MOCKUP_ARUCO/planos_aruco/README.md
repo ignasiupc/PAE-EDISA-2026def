@@ -267,7 +267,7 @@ chmod 755 photos
 ```bash
 # Instalar dependencias del sistema
 sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-pip3 install --upgrade mavsdk
+pip3 install -r requirements.txt
 ```
 
 ### Logs y Debugging
