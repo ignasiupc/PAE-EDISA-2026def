@@ -109,17 +109,36 @@ def abrir_camara():
         return read_fn, release_fn
 
     else:
-        cap = cv2.VideoCapture(VIDEO_SOURCE_FALLBACK)
-        if not cap.isOpened():
-            raise RuntimeError(
-                f"No se puede abrir la cámara (source={VIDEO_SOURCE_FALLBACK}). "
-                "Comprueba que la cámara está conectada y habilitada."
-            )
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, RESOLUCION[0])
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RESOLUCION[1])
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"  Cámara abierta (VideoCapture): {w}x{h}")
+        # Intentar primero con GStreamer + libcamerasrc (Ubuntu en Raspberry Pi)
+        gst = (
+            f"libcamerasrc ! "
+            f"video/x-raw,width={RESOLUCION[0]},height={RESOLUCION[1]},framerate=30/1 ! "
+            f"videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
+        )
+        cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            ok, _ = cap.read()
+            if ok:
+                print(f"  Cámara abierta (libcamerasrc GStreamer): {RESOLUCION[0]}x{RESOLUCION[1]}")
+            else:
+                cap.release()
+                cap = None
+        else:
+            cap = None
+
+        # Fallback a VideoCapture estándar
+        if cap is None:
+            cap = cv2.VideoCapture(VIDEO_SOURCE_FALLBACK)
+            if not cap.isOpened():
+                raise RuntimeError(
+                    f"No se puede abrir la cámara (source={VIDEO_SOURCE_FALLBACK}). "
+                    "Comprueba que la cámara está conectada y habilitada."
+                )
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, RESOLUCION[0])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RESOLUCION[1])
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            print(f"  Cámara abierta (VideoCapture): {w}x{h}")
 
         def read_fn():
             return cap.read()
