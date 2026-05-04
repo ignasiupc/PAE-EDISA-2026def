@@ -17,7 +17,7 @@ from volumetria_BLOC3_1 import calcular_volumetria
 # CONFIGURACIÓ GENERAL
 # ==========================================
 CARPETA_FOTOS = "fotos_capturades" 
-DISTANCIA_LIDAR_CM = 150.0
+DISTANCIA_LIDAR_CM = 120.0
 CARPETA_RESULTATS = "Resultats_BLOC0"
 MARGE_BORDE_VALIDACIO = 10 
 
@@ -26,7 +26,7 @@ MANIFEST_CSV = "etiquetes_magatzem_simulades_manifest.csv"
 # ==========================================
 # CONFIGURACIÓ DE CAPTURA DE VÍDEO
 # ==========================================
-GRAVAR_NOU_VIDEO = False        
+GRAVAR_NOU_VIDEO = True        
 FONT_VIDEO = "tcp://172.20.10.2:8888"                 
 INTERVAL_CAPTURA_SEG = 1.0      
 # ==========================================
