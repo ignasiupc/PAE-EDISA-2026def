@@ -3,7 +3,7 @@
 ip LAN portatil-raspberry: 192.168.137.129
 ip wifi "Iphone de Aitor": 172.20.10.3
 
-ssh pi@172.20.10.3
+ssh pi@172.20.10.2
 
 
 --Enviar video--
