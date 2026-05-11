@@ -17,3 +17,4 @@ MOCKUP_ARUCO/results/*
 MOCKUP_ARUCO/config/camera_profiles/*
 !MOCKUP_ARUCO/config/camera_profiles/.gitkeep
 MOCKUP_ARUCO/config/camera_calibration.json
+WP3.zip
