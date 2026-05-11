@@ -40,7 +40,7 @@ def detectar_qualsevol_caixa(ruta_o_img, mostrar_visualment=False, bbox_objectiu
         box_ampliada = bbox_objectiu
     else:
         if detector is None:
-            detector = YOLO("yolov8s-world.pt")
+            detector = YOLO("models/yolov8s-world.pt")
             detector.set_classes(["box"]) 
         resultats_det = detector.predict(img, conf=0.1, verbose=False)
         if not resultats_det[0].boxes: return None
@@ -50,7 +50,7 @@ def detectar_qualsevol_caixa(ruta_o_img, mostrar_visualment=False, bbox_objectiu
         box_ampliada = [max(0, x1-marge), max(0, y1-marge), min(img.shape[1], x2+marge), min(img.shape[0], y2+marge)]
 
     if segmentador is None:
-        segmentador = SAM("mobile_sam.pt") 
+        segmentador = SAM("models/mobile_sam.pt") 
         
     resultats_sam = segmentador.predict(img, bboxes=box_ampliada, verbose=False)
     if not resultats_sam[0].masks: return None
@@ -180,10 +180,10 @@ def detectar_qualsevol_caixa(ruta_o_img, mostrar_visualment=False, bbox_objectiu
         vertexs_dibuix = np.array(coordenades_esmolades, dtype=np.int32).reshape((-1, 1, 2))
         cv2.drawContours(img_resultat, [vertexs_dibuix], -1, (0, 255, 0), 3) 
 
-        os.makedirs("resultats_SAM", exist_ok=True)
-        cv2.imwrite(os.path.join("resultats_SAM", nom_arxiu_guardar), img_sam_visual)
-        os.makedirs("Resultats_BLOC1", exist_ok=True)
-        cv2.imwrite(os.path.join("Resultats_BLOC1", nom_arxiu_guardar), img_resultat)
+        os.makedirs("outputs/resultats_SAM", exist_ok=True)
+        cv2.imwrite(os.path.join("outputs/resultats_SAM", nom_arxiu_guardar), img_sam_visual)
+        os.makedirs("outputs/Resultats_BLOC1", exist_ok=True)
+        cv2.imwrite(os.path.join("outputs/Resultats_BLOC1", nom_arxiu_guardar), img_resultat)
 
     # RETORNAR: Si hi ha punts corruptes, retornem None per invalidar el volum
     return coordenades_esmolades if fotograma_valid else None

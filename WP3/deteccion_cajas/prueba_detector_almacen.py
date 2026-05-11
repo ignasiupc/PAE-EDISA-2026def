@@ -33,11 +33,11 @@ from groundingdino.util.inference import load_model, load_image, predict, annota
 
 CONFIG_PATH  = "groundingdino/config/GroundingDINO_SwinT_OGC.py"
 WEIGHTS_PATH = "weights/groundingdino_swint_ogc.pth"
-FOTOS_DIR    = "mis_imagenes/"
+FOTOS_DIR    = "data/mis_imagenes/"
 #IMAGE_NAME   = "20260218_131608.jpg"   
 IMAGE_NAME   = "20260218_131604.jpg"
 #IMAGE_NAME   = "Imagenpegada.png"
-OUTPUT_BASE  = "comparacion_resultados/"
+OUTPUT_BASE  = "outputs/comparacion_resultados/"
 
 TEXT_PROMPT  = "cardboard box . box . carton . stacked cardboard box . warehouse package . pallet ."
  

@@ -17,13 +17,13 @@ from volumetria_BLOC3_1 import calcular_volumetria
 # ==========================================
 # CONFIGURACIÓ GENERAL
 # ==========================================
-CARPETA_FOTOS = "fotos_capturades"
+CARPETA_FOTOS = "data/fotos_capturades"
 DISTANCIA_LIDAR_CM = 120.0
-CARPETA_RESULTATS = "Resultats_BLOC0"
+CARPETA_RESULTATS = "outputs/Resultats_BLOC0"
 MARGE_BORDE_VALIDACIO = 10
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MANIFEST_CSV = os.path.join(BASE_DIR, "etiquetes_magatzem_simulades_manifest.csv")
+MANIFEST_CSV = os.path.join(BASE_DIR, "data", "etiquetes_magatzem_simulades_manifest.csv")
 
 # ==========================================
 # CONFIGURACIÓ DE CAPTURA DE VÍDEO
@@ -213,9 +213,9 @@ def executar_pipeline_orquestrat():
         if not os.path.exists(CARPETA_FOTOS): return
 
     print("\nCarregant models d'Intel·ligència Artificial...")
-    detector = YOLO("yolov8s-world.pt")
+    detector = YOLO("models/yolov8s-world.pt")
     detector.set_classes(["box"]) 
-    segmentador = SAM("mobile_sam.pt") 
+    segmentador = SAM("models/mobile_sam.pt") 
 
     os.makedirs(CARPETA_RESULTATS, exist_ok=True)
     arxius = sorted([f for f in os.listdir(CARPETA_FOTOS) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
