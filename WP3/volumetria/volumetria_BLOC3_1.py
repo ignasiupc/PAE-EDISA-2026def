@@ -1,13 +1,13 @@
-import os
-import cv2
 import math
-import statistics
+import numpy as np
 
 # ==========================================
 # CONFIGURACIÓ DE L'ENTORN
 # ==========================================
-DISTANCIA_LIDAR_CM = 150.0  
-DISTANCIA_FOCAL_PX = 2976.74 
+DISTANCIA_LIDAR_CM = 120.0
+DISTANCIA_FOCAL_PX = 1410.71  # IMX708 (RPi Cam 4): 4.74mm / 1.4µm = 3385.7px natius, /2.4 binning = 1410.7px
+AMPLE_IMATGE_PX    = 1920     # Resolució horitzontal fixa de la càmera
+CX_PX              = AMPLE_IMATGE_PX / 2.0  # Centre òptic horitzontal
 
 # Factor per compensar l'angle picat del dron a l'eix Z
 # De momeent el deixem en 1 (sense correcció), i l'anirem ajustant quan fem les proves amb el dron real.
@@ -60,13 +60,7 @@ def calcular_volumetria(ruta_carpeta, diccionari_punts):
     resultats_profunditat_persp = []
     
     for nom_imatge, punts in diccionari_punts.items():
-        ruta_completa = os.path.join(ruta_carpeta, nom_imatge)
-        img = cv2.imread(ruta_completa)
-        
-        if img is None: continue
-            
-        ample_img = img.shape[1]
-        cx = ample_img / 2.0  
+        cx = CX_PX
 
         x_coords = [p[0] for p in punts]
         y_coords = [p[1] for p in punts]
@@ -93,8 +87,8 @@ def calcular_volumetria(ruta_carpeta, diccionari_punts):
         # CAS 2: FOTO EN PERSPECTIVA (5 o 6 vèrtexs)
         # =======================================================
         if len(punts) >= 5:
-            # Deduïm l'aresta central pel punt més baix
-            p_bottom = punts[y_coords.index(y_baix)]
+            # Deduïm l'aresta central pel punt més baix (max per evitar empat amb index)
+            p_bottom = punts[max(range(len(y_coords)), key=lambda i: y_coords[i])]
             x_cen = float(p_bottom[0])
 
             w_cara_1_px = abs(x_cen - x_esq)
@@ -143,25 +137,24 @@ def calcular_volumetria(ruta_carpeta, diccionari_punts):
         
     # Per a Amplada i Alçada, prioritzem de forma absoluta les mesures frontals si existeixen
     if len(resultats_amplada_frontal) > 0:
-        amp_final = statistics.median(resultats_amplada_frontal)
-        alc_final = statistics.median(resultats_alcada_frontal)
+        amp_final = float(np.median(resultats_amplada_frontal))
+        alc_final = float(np.median(resultats_alcada_frontal))
         print("\n[INFO] S'han utilitzat les fotos frontals com a 'Ground Truth' per a X i Y.")
     else:
-        amp_final = statistics.median(resultats_amplada_persp)
-        alc_final = statistics.median(resultats_alcada_persp)
+        amp_final = float(np.median(resultats_amplada_persp))
+        alc_final = float(np.median(resultats_alcada_persp))
         print("\n[INFO] Sense fotos frontals pures. Extracció de X i Y basada en perspectiva.")
 
     # La profunditat sempre ve de les fotos en perspectiva (corregides per l'escorç)
-    prof_final = statistics.median(resultats_profunditat_persp)
-    
+    prof_final = float(np.median(resultats_profunditat_persp))
+
     volum_final = amp_final * prof_final * alc_final
-    
-    print("\n==========================================")
-    print(f" RESULTATS FINALS DRON (Frontals: {len(resultats_amplada_frontal)}, Perspectiva: {len(resultats_profunditat_persp)})")
-    print("==========================================")
-    print(f"Amplada (Frontal):    {amp_final:.1f} cm")
-    print(f"Profunditat (Lateral):{prof_final:.1f} cm")
-    print(f"Alçada estimada:      {alc_final:.1f} cm")
-    print("------------------------------------------")
-    print(f"VOLUM TOTAL:          {volum_final:.2f} cm³")
-    print("==========================================")
+
+    return {
+        'amplada_cm':     round(amp_final,   1),
+        'profunditat_cm': round(prof_final,  1),
+        'alcada_cm':      round(alc_final,   1),
+        'volum_cm3':      round(volum_final, 2),
+        'n_frontals':     len(resultats_amplada_frontal),
+        'n_perspectiva':  len(resultats_profunditat_persp),
+    }
