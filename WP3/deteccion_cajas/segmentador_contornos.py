@@ -17,7 +17,7 @@ from pathlib import Path
 #  ⚙️  PARÁMETROS DE SEGMENTACIÓN
 # ============================================================
 
-SAM_WEIGHTS       = "../volumetria/mobile_sam.pt"   # Ajusta la ruta si es necesario
+SAM_WEIGHTS       = "models/mobile_sam.pt"
 POLY_MIN_VERTICES = 4
 POLY_MAX_VERTICES = 8
 

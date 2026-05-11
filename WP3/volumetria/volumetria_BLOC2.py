@@ -8,7 +8,7 @@ from ultralytics import YOLO, SAM
 # CONFIGURACIÓ PRINCIPAL (BLOC 2)
 # ==========================================
 CARPETA_FOTOS_SEQ = "../fotos_caixa" 
-CARPETA_RESULTATS = "Resultats_BLOC2" # Ja no l'usarem directament, però ho deixem
+CARPETA_RESULTATS = "outputs/Resultats_BLOC2" # Ja no l'usarem directament, però ho deixem
 
 # ==========================================
 # CONFIGURACIÓ DE FILTRES GEOMÈTRICS

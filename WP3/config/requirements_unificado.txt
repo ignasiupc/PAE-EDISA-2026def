@@ -1,0 +1,22 @@
+
+addict
+numpy
+opencv-python
+pycocotools
+pyzbar
+scipy
+supervision>=0.22.0
+timm
+torch
+torchvision
+transformers==4.36.0
+ultralytics
+yapf
+
+# Dependencia nativa requerida por pyzbar:
+#   Windows: instalar ZBar y asegurar que sus DLL esten en PATH.
+#   Debian / Raspberry Pi OS: sudo apt install -y libzbar0
+#   macOS: brew install zbar
+#
+# Los modos detectar-imagenes y detectar-video tambien requieren:
+#   WP3/deteccion_cajas/weights/groundingdino_swint_ogc.pth
