@@ -2,97 +2,532 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src * data:; connect-src ws://localhost:* http://localhost:*">
   <title>Drone GCS</title>
-  <link rel="stylesheet" href="style.css">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:     #1a1d23;
+      --panel:  #22262f;
+      --card:   #1e2229;
+      --border: #2e3340;
+      --accent: #4d9fff;
+      --warn:   #f0a500;
+      --danger: #e04040;
+      --ok:     #3ddc84;
+      --text:   #cdd3de;
+      --muted:  #5a6072;
+      --topbar: 44px;
+      --motors: 108px;
+    }
+    html, body { width:100%; height:100%; background:var(--bg); color:var(--text);
+      font-family:'Segoe UI',system-ui,sans-serif; font-size:13px; overflow:hidden; }
+
+    /* ── TOPBAR ─────────────────────────────────── */
+    #topbar {
+      display:flex; align-items:center; height:var(--topbar);
+      background:var(--panel); border-bottom:1px solid var(--border);
+      padding:0 12px; gap:0; position:relative; z-index:10;
+    }
+    .logo { font-size:15px; font-weight:800; letter-spacing:.5px;
+            color:var(--accent); white-space:nowrap; margin-right:16px; }
+    .logo em { color:var(--text); font-style:normal; font-weight:400; }
+
+    #tab-nav { display:flex; align-items:stretch; height:100%; flex:1; gap:1px; }
+    .tab-btn {
+      padding:0 18px; background:none; border:none; border-bottom:3px solid transparent;
+      color:var(--muted); font-size:12px; font-weight:600; letter-spacing:.5px;
+      text-transform:uppercase; cursor:pointer; transition:color .2s,border-color .2s;
+      white-space:nowrap;
+    }
+    .tab-btn:hover { color:var(--text); }
+    .tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+
+    #conn-row { display:flex; align-items:center; gap:8px; margin-left:auto; }
+    #ros-dot { width:8px; height:8px; border-radius:50%; background:var(--muted); flex-shrink:0; }
+    #ros-dot.connected  { background:var(--ok);     box-shadow:0 0 6px var(--ok); }
+    #ros-dot.connecting { background:var(--warn);   animation:blink 1s infinite; }
+    #ros-dot.error      { background:var(--danger); }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+    #ros-url { font-size:11px; color:var(--muted); margin-right:6px; }
+    .hdr-badge {
+      padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700;
+      background:var(--border); color:var(--muted); letter-spacing:.3px;
+    }
+    .hdr-badge.armed  { background:rgba(224,64,64,.2);  color:var(--danger); }
+    .hdr-badge.active { background:rgba(77,159,255,.15); color:var(--accent); }
+    .hdr-badge.ok     { background:rgba(61,220,132,.15); color:var(--ok); }
+
+    /* ── VIEWS ──────────────────────────────────── */
+    .view { display:none; }
+    .view.active { display:flex; flex-direction:column; }
+
+    /* ── SHARED ─────────────────────────────────── */
+    .ph {  /* panel header */
+      padding:5px 10px; font-size:10px; font-weight:700; letter-spacing:1.2px;
+      text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--border);
+      flex-shrink:0;
+    }
+    .srow { display:flex; justify-content:space-between; align-items:center;
+            padding:4px 10px; border-bottom:1px solid rgba(46,51,64,.5); }
+    .srow .sk { color:var(--muted); font-size:11px; }
+    .srow .sv { font-size:12px; font-weight:600; }
+    .sv.ok     { color:var(--ok); }
+    .sv.warn   { color:var(--warn); }
+    .sv.danger { color:var(--danger); }
+    .sv.accent { color:var(--accent); }
+
+    /* ════════════════════════════════════════════
+       DASHBOARD
+    ═══════════════════════════════════════════ */
+    #view-dashboard {
+      height: calc(100vh - var(--topbar));
+    }
+    #dash-main {
+      display:grid;
+      grid-template-columns: 190px 1fr 234px;
+      flex:1; overflow:hidden;
+      height: calc(100vh - var(--topbar) - var(--motors));
+    }
+
+    /* KPI column */
+    #kpi-col {
+      background:var(--panel); border-right:1px solid var(--border);
+      display:flex; flex-direction:column; overflow:hidden;
+    }
+    #kpi-col .ph { background:var(--panel); }
+    .kpi-block {
+      padding:10px 12px; border-bottom:1px solid var(--border); flex-shrink:0;
+    }
+    .kpi-lbl { font-size:10px; color:var(--muted); text-transform:uppercase;
+               letter-spacing:.8px; margin-bottom:4px; }
+    .kpi-num { font-size:28px; font-weight:700; line-height:1; color:var(--text); }
+    .kpi-num .unit { font-size:12px; color:var(--muted); margin-left:3px; font-weight:400; }
+
+    /* speedometer canvas block */
+    #spd-block { padding:8px; display:flex; justify-content:center;
+                 border-bottom:1px solid var(--border); flex-shrink:0; }
+    #gauge-speed { display:block; }
+
+    /* battery arc block */
+    #bat-block { padding:6px 12px 8px; border-bottom:1px solid var(--border);
+                 display:flex; align-items:center; gap:10px; flex-shrink:0; }
+    #bat-block .bat-info { flex:1; }
+    #bat-block .kpi-num { font-size:22px; }
+    #bat-block .kpi-lbl { margin-bottom:2px; }
+    #gauge-battery { display:block; flex-shrink:0; }
+
+    /* mode/arm */
+    #mode-block { padding:10px 12px; display:flex; flex-wrap:wrap; gap:5px; flex-shrink:0; }
+    .pill {
+      padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700;
+      background:var(--border); color:var(--muted);
+    }
+    .pill.armed  { background:rgba(224,64,64,.2); color:var(--danger); }
+    .pill.active { background:rgba(77,159,255,.15); color:var(--accent); }
+    .pill.ok     { background:rgba(61,220,132,.15); color:var(--ok); }
+
+    /* Camera */
+    #cam-col {
+      background:#0d0f13; display:flex; flex-direction:column; position:relative;
+    }
+    #cam-col .ph { background:#111418; color:rgba(255,255,255,.35);
+                   display:flex; justify-content:space-between; }
+    .cam-sig { font-size:10px; }
+    .cam-sig.no  { color:var(--danger); }
+    .cam-sig.ok  { color:var(--ok); }
+    #cam1 { flex:1; width:100%; min-height:0; display:block; }
+
+    /* Map + DB */
+    #right-col {
+      background:var(--panel); border-left:1px solid var(--border);
+      display:flex; flex-direction:column; overflow:hidden;
+    }
+    #map-wrap { flex:1; min-height:0; display:flex; flex-direction:column; }
+    #map-canvas { flex:1; width:100%; min-height:0; display:block; }
+    #db-wrap { flex-shrink:0; height:220px; border-top:1px solid var(--border);
+               display:flex; flex-direction:column; overflow:hidden; }
+    #db-latest {
+      padding:6px 10px; font-size:11px; border-bottom:1px solid var(--border);
+      min-height:32px; display:flex; align-items:center; gap:8px; flex-shrink:0;
+    }
+    #db-latest .bc-badge {
+      background:rgba(61,220,132,.15); color:var(--ok); padding:1px 7px;
+      border-radius:4px; font-size:12px; font-weight:700; font-family:monospace;
+    }
+    #db-latest .bc-new { animation:flash .8s; }
+    @keyframes flash { 0%{opacity:0;transform:scale(.9)} 100%{opacity:1;transform:scale(1)} }
+    #db-table { width:100%; border-collapse:collapse; font-size:11px; }
+    #db-table th { padding:4px 8px; text-align:left; color:var(--muted);
+                   font-size:10px; letter-spacing:.5px; border-bottom:1px solid var(--border);
+                   background:var(--panel); position:sticky; top:0; }
+    #db-table td { padding:3px 8px; border-bottom:1px solid rgba(46,51,64,.4); }
+    #db-scroll { overflow-y:auto; flex:1; }
+    .db-ok { color:var(--ok); font-weight:700; }
+
+    /* Motor strip */
+    #motor-strip {
+      height:var(--motors); background:var(--card); border-top:1px solid var(--border);
+      display:flex; align-items:center; padding:0 20px; gap:20px; flex-shrink:0;
+    }
+    .motors-title { font-size:10px; font-weight:700; color:var(--muted);
+                    letter-spacing:1.2px; text-transform:uppercase; writing-mode:vertical-lr;
+                    transform:rotate(180deg); }
+    .motors-row { display:flex; gap:16px; flex:1; justify-content:space-around;
+                  align-items:center; }
+    .motor-cell { display:flex; flex-direction:column; align-items:center; gap:3px; }
+    .motor-cell canvas { display:block; }
+    .motor-cell span { font-size:10px; color:var(--muted); font-weight:700;
+                       letter-spacing:.5px; }
+
+    /* ════════════════════════════════════════════
+       NAVIGATION
+    ═══════════════════════════════════════════ */
+    #view-navigation {
+      height: calc(100vh - var(--topbar));
+      grid-template-rows: 1fr 1fr;
+    }
+    #view-navigation.active { display:grid !important; }
+    #nav-top { display:grid; grid-template-columns:1fr 1fr 220px;
+               border-bottom:1px solid var(--border); min-height:0; }
+    #nav-charts { display:grid; grid-template-columns:1fr 1fr 1fr; min-height:0; }
+
+    .nav-card { display:flex; flex-direction:column; overflow:hidden;
+                border-right:1px solid var(--border); background:var(--panel); }
+    .nav-card:last-child { border-right:none; }
+    .nav-card canvas { flex:1; width:100%; min-height:0; display:block; }
+
+    .stats-list { overflow-y:auto; flex:1; }
+
+    .chart-card { display:flex; flex-direction:column; overflow:hidden;
+                  background:var(--card); border-right:1px solid var(--border); }
+    .chart-card:last-child { border-right:none; }
+    .chart-card canvas { flex:1; width:100%; min-height:0; display:block; }
+
+    /* ════════════════════════════════════════════
+       SLAM
+    ═══════════════════════════════════════════ */
+    #view-slam {
+      height: calc(100vh - var(--topbar));
+      grid-template-columns: 1fr 220px;
+    }
+    #view-slam.active { display:grid !important; }
+    #slam-main { display:flex; flex-direction:column; background:#0a0e14; }
+    #slam-canvas { flex:1; width:100%; min-height:0; display:block; }
+    #slam-side { background:var(--panel); border-left:1px solid var(--border);
+                 display:flex; flex-direction:column; overflow-y:auto; }
+
+    /* ════════════════════════════════════════════
+       IMAGE PROCESSING (last tab)
+    ═══════════════════════════════════════════ */
+    #view-image {
+      height: calc(100vh - var(--topbar));
+      grid-template-columns: 1fr 240px;
+    }
+    #view-image.active { display:grid !important; }
+    #img-left { display:flex; flex-direction:column; min-width:0; overflow:hidden; }
+    #img-cams { display:grid; grid-template-columns:1fr 1fr; flex:1; min-height:0; }
+    .img-cam { display:flex; flex-direction:column; background:#0d0f13;
+               border-right:1px solid var(--border); overflow:hidden; }
+    .img-cam:last-child { border-right:none; }
+    .img-cam canvas { flex:1; width:100%; min-height:0; display:block; }
+
+    #img-bottom { display:grid; grid-template-columns:1fr 1fr; flex-shrink:0; height:220px;
+                  border-top:1px solid var(--border); }
+    #detect-wrap { background:var(--panel); border-right:1px solid var(--border);
+                   display:flex; flex-direction:column; overflow:hidden; }
+    #dblog-wrap  { background:var(--card); display:flex; flex-direction:column; overflow:hidden; }
+
+    #detect-table { width:100%; border-collapse:collapse; font-size:11px; }
+    #detect-table th { padding:4px 8px; text-align:left; color:var(--muted);
+                       font-size:10px; border-bottom:1px solid var(--border);
+                       background:var(--panel); position:sticky; top:0; }
+    #detect-table td { padding:3px 8px; border-bottom:1px solid rgba(46,51,64,.4); }
+    #detect-scroll { overflow-y:auto; flex:1; }
+
+    #db-log-list { overflow-y:auto; flex:1; padding:4px 0; }
+    .log-entry { padding:4px 10px; font-size:11px; border-bottom:1px solid rgba(46,51,64,.3);
+                 display:flex; gap:8px; }
+    .log-time { color:var(--muted); font-family:monospace; flex-shrink:0; }
+    .log-msg  { flex:1; }
+    .log-ok   { color:var(--ok); }
+    .log-warn { color:var(--warn); }
+
+    /* Volumetry sidebar */
+    #img-side {
+      background:var(--panel); border-left:1px solid var(--border);
+      display:flex; flex-direction:column; overflow:hidden;
+    }
+    .vol-kpi { padding:10px 12px; border-bottom:1px solid var(--border); flex-shrink:0; }
+    .vol-kpi .kpi-lbl { font-size:10px; color:var(--muted); text-transform:uppercase;
+                        letter-spacing:.8px; margin-bottom:4px; }
+    .vol-kpi .kpi-num { font-size:24px; font-weight:700; color:var(--text); line-height:1; }
+    .vol-kpi .kpi-num .unit { font-size:11px; color:var(--muted); font-weight:400; margin-left:3px; }
+    #vol-log-list { overflow-y:auto; flex:1; padding:4px 0; }
+    .vol-entry { padding:5px 10px; border-bottom:1px solid rgba(46,51,64,.3); }
+    .vol-dims { color:var(--accent); font-family:monospace; font-size:12px; font-weight:600; }
+    .vol-time { color:var(--muted); font-family:monospace; font-size:10px; margin-top:2px; }
+  </style>
 </head>
 <body>
 
-  <!-- ── Header ─────────────────────────────────────────────────────────── -->
-  <header id="header">
-    <span id="app-title">DRONE GCS</span>
-    <span id="pose-display">Pose  X:—  Y:—  Z:—  Yaw:—</span>
-    <div id="header-right">
-      <span id="ws-url">ws://localhost:9090</span>
-      <span id="status">● CONNECTING…</span>
+<!-- ── TOPBAR ──────────────────────────────────────────── -->
+<header id="topbar">
+  <span class="logo">DRONE <em>GCS</em></span>
+  <nav id="tab-nav">
+    <button class="tab-btn active" data-view="dashboard">Dashboard</button>
+    <button class="tab-btn"        data-view="navigation">Navigation</button>
+    <button class="tab-btn"        data-view="slam">SLAM</button>
+    <button class="tab-btn"        data-view="image">Image Processing</button>
+  </nav>
+  <div id="conn-row">
+    <div id="ros-dot" class="connecting"></div>
+    <span id="ros-url">localhost:9090</span>
+    <span class="hdr-badge" id="hdr-armed">DISARMED</span>
+    <span class="hdr-badge" id="hdr-mode">—</span>
+    <span class="hdr-badge" id="hdr-gps">NO GPS</span>
+  </div>
+</header>
+
+<!-- ══════════════════════════════════════════════════════
+     DASHBOARD
+══════════════════════════════════════════════════════ -->
+<section class="view active" id="view-dashboard">
+  <div id="dash-main">
+
+    <!-- KPI column -->
+    <div id="kpi-col">
+      <div class="ph">Airspeed</div>
+      <div id="spd-block"><canvas id="gauge-speed" width="166" height="166"></canvas></div>
+
+      <div class="kpi-block">
+        <div class="kpi-lbl">Altitude (rel)</div>
+        <div class="kpi-num"><span id="val-alt">0.0</span><span class="unit">m</span></div>
+        <div style="margin-top:6px;height:4px;background:var(--border);border-radius:2px">
+          <div id="bar-alt" style="height:100%;width:0%;border-radius:2px;background:var(--accent);transition:width .4s"></div>
+        </div>
+      </div>
+
+      <div id="bat-block">
+        <canvas id="gauge-battery" width="64" height="64"></canvas>
+        <div class="bat-info">
+          <div class="kpi-lbl">Battery</div>
+          <div class="kpi-num"><span id="val-bat">—</span><span class="unit">%</span></div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px" id="val-volt">— V</div>
+        </div>
+      </div>
+
+      <div class="kpi-block">
+        <div class="kpi-lbl">Heading</div>
+        <div class="kpi-num"><span id="val-hdg">—</span><span class="unit">°</span></div>
+      </div>
+
+      <div id="mode-block">
+        <span class="pill" id="pill-arm">DISARMED</span>
+        <span class="pill" id="pill-mode">—</span>
+      </div>
+
+      <!-- position at bottom -->
+      <div style="margin-top:auto; border-top:1px solid var(--border)">
+        <div class="ph">Position</div>
+        <div class="srow"><span class="sk">Lat</span><span class="sv" id="val-lat">—</span></div>
+        <div class="srow"><span class="sk">Lon</span><span class="sv" id="val-lon">—</span></div>
+        <div class="srow"><span class="sk">Alt abs</span><span class="sv" id="val-alt-abs">—</span></div>
+        <div class="srow"><span class="sk">Sats</span><span class="sv" id="val-sats">—</span></div>
+      </div>
     </div>
-  </header>
 
-  <!-- ── Body grid ──────────────────────────────────────────────────────── -->
-  <main id="main">
+    <!-- Camera -->
+    <div id="cam-col">
+      <div class="ph">
+        <span>Cam 1 — Forward</span>
+        <span class="cam-sig no" id="cam1-sig">NO SIGNAL</span>
+      </div>
+      <canvas id="cam1"></canvas>
+    </div>
 
-    <!-- Row 0 · Video streams + Nav map -->
-    <section class="group" id="cam1-group">
-      <p class="group-title">CAMERA 1 — /sensor/camera_front <span class="pending">(pending)</span></p>
-      <canvas id="cam1-canvas"></canvas>
-    </section>
+    <!-- Map + DB -->
+    <div id="right-col">
+      <div id="map-wrap">
+        <div class="ph">Nav Map</div>
+        <canvas id="map-canvas"></canvas>
+      </div>
 
-    <section class="group" id="cam2-group">
-      <p class="group-title">CAMERA 2 — /sensor/camera_down <span class="pending">(pending)</span></p>
-      <canvas id="cam2-canvas"></canvas>
-    </section>
-
-    <section class="group" id="nav-group">
-      <p class="group-title">NAV MAP — nav_msgs/Odometry <span class="pending">(pending — using /drone/pose)</span></p>
-      <canvas id="nav-canvas"></canvas>
-    </section>
-
-    <!-- Row 1 · Telemetry -->
-    <div id="tele-row">
-
-      <section class="group" id="speed-group">
-        <p class="group-title">SPEED — /drone/cmd_vel</p>
-        <canvas id="speed-canvas"></canvas>
-      </section>
-
-      <section class="group" id="alt-group">
-        <p class="group-title">ALTITUDE — /drone/pose [z]</p>
-        <div id="alt-inner">
-          <div id="alt-track">
-            <div id="alt-fill"></div>
-            <div id="alt-ticks">
-              <span></span><span></span><span></span>
-            </div>
-          </div>
-          <span id="alt-label">0.0 m</span>
+      <div id="db-wrap">
+        <div class="ph" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Barcode Database</span>
+          <span style="font-size:10px;color:var(--muted)" id="db-count">0 records</span>
         </div>
-      </section>
-
-      <section class="group" id="bat-group">
-        <p class="group-title">BATTERY — /sensor/battery <span class="pending">(pending)</span></p>
-        <div id="bat-inner">
-          <div id="bat-track"><div id="bat-fill"></div></div>
-          <span id="bat-label">100 % ██████████</span>
-          <span class="pending" style="font-size:9px;margin-top:4px">/sensor/battery not yet connected</span>
+        <div id="db-latest">
+          <span style="color:var(--muted);font-size:11px">Last scan: </span>
+          <span class="bc-badge" id="db-last-code">—</span>
         </div>
-      </section>
-
-      <section class="group" id="log-group">
-        <p class="group-title">BARCODE DATABASE LOG</p>
-        <div id="log-scroll">
-          <table id="log-table">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Barcode</th>
-                <th>Shelf</th>
-                <th>Row</th>
-                <th>Conf.</th>
-              </tr>
-            </thead>
-            <tbody id="log-tbody"></tbody>
+        <div id="db-scroll">
+          <table id="db-table">
+            <thead><tr><th>Barcode</th><th>Time</th><th>Status</th></tr></thead>
+            <tbody id="db-tbody"></tbody>
           </table>
         </div>
-        <p id="log-placeholder">Awaiting barcode detections…<br>
-          <span class="pending">(image tracking node not yet implemented)</span>
-        </p>
-      </section>
+      </div>
+    </div>
+  </div>
 
-    </div><!-- /tele-row -->
-  </main>
+  <!-- Motor strip -->
+  <div id="motor-strip">
+    <div class="motors-title">Propulsors</div>
+    <div class="motors-row">
+      <div class="motor-cell"><canvas id="motor-1" width="76" height="76"></canvas><span>M1</span></div>
+      <div class="motor-cell"><canvas id="motor-2" width="76" height="76"></canvas><span>M2</span></div>
+      <div class="motor-cell"><canvas id="motor-3" width="76" height="76"></canvas><span>M3</span></div>
+      <div class="motor-cell"><canvas id="motor-4" width="76" height="76"></canvas><span>M4</span></div>
+      <div class="motor-cell"><canvas id="motor-5" width="76" height="76"></canvas><span>M5</span></div>
+      <div class="motor-cell"><canvas id="motor-6" width="76" height="76"></canvas><span>M6</span></div>
+    </div>
+  </div>
+</section>
 
-  <script src="lib/roslib.js"></script>
-  <script src="app.js"></script>
+<!-- ══════════════════════════════════════════════════════
+     NAVIGATION
+══════════════════════════════════════════════════════ -->
+<section class="view" id="view-navigation">
+  <div id="nav-top">
+    <div class="nav-card">
+      <div class="ph">Artificial Horizon</div>
+      <canvas id="horizon-canvas"></canvas>
+    </div>
+    <div class="nav-card">
+      <div class="ph">Compass</div>
+      <canvas id="compass-canvas"></canvas>
+    </div>
+    <div class="nav-card" style="border-right:none">
+      <div class="ph">Flight Data</div>
+      <div class="stats-list">
+        <div class="srow"><span class="sk">Airspeed</span>   <span class="sv accent" id="nav-spd">— m/s</span></div>
+        <div class="srow"><span class="sk">V. Speed</span>   <span class="sv" id="nav-vspd">— m/s</span></div>
+        <div class="srow"><span class="sk">Altitude</span>   <span class="sv accent" id="nav-alt">— m</span></div>
+        <div class="srow"><span class="sk">Heading</span>    <span class="sv" id="nav-hdg">—°</span></div>
+        <div class="srow"><span class="sk">Roll</span>       <span class="sv" id="nav-roll">—°</span></div>
+        <div class="srow"><span class="sk">Pitch</span>      <span class="sv" id="nav-pitch">—°</span></div>
+        <div class="srow"><span class="sk">Yaw</span>        <span class="sv" id="nav-yaw">—°</span></div>
+        <div class="srow"><span class="sk">Vx</span>         <span class="sv" id="nav-vx">— m/s</span></div>
+        <div class="srow"><span class="sk">Vy</span>         <span class="sv" id="nav-vy">— m/s</span></div>
+        <div class="srow"><span class="sk">Vz</span>         <span class="sv" id="nav-vz">— m/s</span></div>
+        <div class="srow"><span class="sk">Satellites</span><span class="sv" id="nav-sats">—</span></div>
+        <div class="srow"><span class="sk">GPS Fix</span>   <span class="sv" id="nav-fix">—</span></div>
+        <div class="srow"><span class="sk">Latitude</span>  <span class="sv" id="nav-lat">—</span></div>
+        <div class="srow"><span class="sk">Longitude</span> <span class="sv" id="nav-lon">—</span></div>
+        <div class="srow"><span class="sk">Flight time</span><span class="sv ok" id="nav-ftime">00:00</span></div>
+        <div class="srow"><span class="sk">Armed</span>     <span class="sv" id="nav-armed">—</span></div>
+        <div class="srow"><span class="sk">Mode</span>      <span class="sv accent" id="nav-mode">—</span></div>
+      </div>
+    </div>
+  </div>
+  <div id="nav-charts">
+    <div class="chart-card">
+      <div class="ph">Altitude (m)</div>
+      <canvas id="chart-alt"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="ph">Airspeed (m/s)</div>
+      <canvas id="chart-spd"></canvas>
+    </div>
+    <div class="chart-card" style="border-right:none">
+      <div class="ph">Vertical Speed (m/s)</div>
+      <canvas id="chart-vspd"></canvas>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════
+     SLAM
+══════════════════════════════════════════════════════ -->
+<section class="view" id="view-slam">
+  <div id="slam-main">
+    <div class="ph">Occupancy Map + LiDAR Overlay</div>
+    <canvas id="slam-canvas"></canvas>
+  </div>
+  <div id="slam-side">
+    <div class="ph">SLAM Status</div>
+    <div class="srow"><span class="sk">Status</span>       <span class="sv" id="sl-status">Waiting…</span></div>
+    <div class="srow"><span class="sk">Pose X</span>       <span class="sv" id="sl-x">—</span></div>
+    <div class="srow"><span class="sk">Pose Y</span>       <span class="sv" id="sl-y">—</span></div>
+    <div class="srow"><span class="sk">Orientation</span>  <span class="sv" id="sl-theta">—</span></div>
+    <div class="ph" style="margin-top:4px">Map Info</div>
+    <div class="srow"><span class="sk">Width</span>        <span class="sv" id="sl-mw">—</span></div>
+    <div class="srow"><span class="sk">Height</span>       <span class="sv" id="sl-mh">—</span></div>
+    <div class="srow"><span class="sk">Resolution</span>   <span class="sv" id="sl-res">—</span></div>
+    <div class="srow"><span class="sk">Origin X</span>    <span class="sv" id="sl-ox">—</span></div>
+    <div class="srow"><span class="sk">Origin Y</span>    <span class="sv" id="sl-oy">—</span></div>
+    <div class="ph" style="margin-top:4px">LiDAR</div>
+    <div class="srow"><span class="sk">Points</span>       <span class="sv" id="sl-pts">—</span></div>
+    <div class="srow"><span class="sk">Min range</span>   <span class="sv" id="sl-minr">—</span></div>
+    <div class="srow"><span class="sk">Max range</span>   <span class="sv" id="sl-maxr">—</span></div>
+    <div class="srow"><span class="sk">Angle step</span>  <span class="sv" id="sl-astep">—</span></div>
+    <div class="ph" style="margin-top:4px">Loop Closure</div>
+    <div class="srow"><span class="sk">Closures</span>    <span class="sv ok" id="sl-lc">0</span></div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════
+     IMAGE PROCESSING (last)
+══════════════════════════════════════════════════════ -->
+<section class="view" id="view-image">
+  <!-- Left: cameras + detection log -->
+  <div id="img-left">
+    <div id="img-cams">
+      <div class="img-cam">
+        <div class="ph" style="display:flex;justify-content:space-between">
+          <span>Cam 1 — Forward · Tracking</span>
+          <span class="cam-sig no" id="icam1-sig">NO SIGNAL</span>
+        </div>
+        <canvas id="icam1"></canvas>
+      </div>
+      <div class="img-cam">
+        <div class="ph" style="display:flex;justify-content:space-between">
+          <span>Cam 2 — Downward · Tracking</span>
+          <span class="cam-sig no" id="icam2-sig">NO SIGNAL</span>
+        </div>
+        <canvas id="icam2"></canvas>
+      </div>
+    </div>
+    <div id="img-bottom">
+      <div id="detect-wrap">
+        <div class="ph">Barcode Detections</div>
+        <div id="detect-scroll">
+          <table id="detect-table">
+            <thead><tr><th>Label</th><th>Barcode / ID</th><th>Conf.</th><th>Time</th></tr></thead>
+            <tbody id="detect-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="dblog-wrap">
+        <div class="ph">Database Update Log</div>
+        <div id="db-log-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: volumetry sidebar -->
+  <div id="img-side">
+    <div class="ph">Volumetry</div>
+    <div class="vol-kpi">
+      <div class="kpi-lbl">Last Volume</div>
+      <div class="kpi-num"><span id="vol-val">—</span><span class="unit">m³</span></div>
+    </div>
+    <div class="srow"><span class="sk">Length</span>     <span class="sv accent" id="vol-l">—</span></div>
+    <div class="srow"><span class="sk">Width</span>      <span class="sv accent" id="vol-w">—</span></div>
+    <div class="srow"><span class="sk">Height</span>     <span class="sv accent" id="vol-h">—</span></div>
+    <div class="srow"><span class="sk">Objects</span>    <span class="sv" id="vol-count">0</span></div>
+    <div class="srow"><span class="sk">Confidence</span> <span class="sv ok" id="vol-conf">—</span></div>
+    <div class="srow" style="flex-direction:column;align-items:flex-start;gap:2px;padding:6px 10px">
+      <span class="sk">Topic</span>
+      <span style="font-size:10px;color:var(--muted);font-family:monospace">/detection/volume</span>
+    </div>
+    <div class="ph" style="margin-top:4px">Volume History</div>
+    <div id="vol-log-list"></div>
+  </div>
+</section>
+
+<script src="lib/roslib.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

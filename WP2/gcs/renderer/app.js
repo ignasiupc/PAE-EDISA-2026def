@@ -1,452 +1,863 @@
 'use strict'
 
-// ── Config — edit these to match your setup ───────────────────────────────────
-const WS_URL        = 'ws://localhost:9090'          // rosbridge WebSocket
-const VIDEO_BASE    = 'http://localhost:8080/stream?topic=' // web_video_server
-const RECONNECT_MS  = 3000
+// ── helpers ───────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id)
+const DEG = Math.PI / 180
+const R2D = 180 / Math.PI
+function clamp (v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
+function fmt1 (v) { return (typeof v === 'number' ? v.toFixed(1) : '—') }
+function fmt2 (v) { return (typeof v === 'number' ? v.toFixed(2) : '—') }
+function fmt6 (v) { return (typeof v === 'number' ? v.toFixed(6) : '—') }
+function now ()   { return new Date().toLocaleTimeString('en-GB', {hour12:false}) }
 
-// ── Topic names ───────────────────────────────────────────────────────────────
-const T_POSE    = '/drone/pose'
-const T_TARGET  = '/cerebro/target'
-const T_VEL     = '/drone/cmd_vel'
-// Stub topics — uncomment when live:
-// const T_CAM_FRONT = '/sensor/camera_front'
-// const T_CAM_DOWN  = '/sensor/camera_down'
-// const T_ODOM      = '/slam/odom'
-// const T_BATTERY   = '/sensor/battery'
-
-// ── Colours ───────────────────────────────────────────────────────────────────
-const C = {
-  bg:     '#1a1d23',
-  panel:  '#252830',
-  border: '#333740',
-  accent: '#4fc3f7',
-  green:  '#4caf50',
-  red:    '#e53935',
-  orange: '#ff9800',
-  text:   '#e0e0e0',
-  dim:    '#616161',
-  trail:  '#546e7a',
+// ── shared state ──────────────────────────────────────────────────────────────
+const S = {
+  speed: 0, vspeed: 0, altitude: 0, heading: 0,
+  roll: 0, pitch: 0, yaw: 0,
+  vx: 0, vy: 0, vz: 0,
+  battery: { pct: 0, voltage: 0 },
+  motors: [0, 0, 0, 0, 0, 0],
+  armed: false, mode: '—',
+  gps: { lat: null, lon: null, altAbs: null, fix: 0, sats: 0 },
+  trail: [],
+  barcodes: [],
+  detections: [],
+  dbLog: [],
+  volumetry: [],
+  lidar: null,
+  occMap: null,
+  slamPose: { x: 0, y: 0, theta: 0 },
+  loopClosures: 0,
+  altHistory: [], spdHistory: [], vspdHistory: [],
+  flightStart: null,
+  activeView: 'dashboard',
 }
 
-const TEST_BARS = [
-  '#c0c0c0', '#c0c000', '#00c0c0', '#00c000',
-  '#c000c0', '#c00000', '#0000c0', '#181818',
-]
+const HIST_MAX = 120   // 120 data points per chart
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function bindCanvas (canvas) {
-  const ro = new ResizeObserver(() => {
-    canvas.width  = canvas.offsetWidth
-    canvas.height = canvas.offsetHeight
-    canvas._onresize && canvas._onresize()
+// ── tab switching ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'))
+    btn.classList.add('active')
+    $('view-' + btn.dataset.view).classList.add('active')
+    S.activeView = btn.dataset.view
+    resizeCanvases()
   })
-  ro.observe(canvas)
+})
+
+// ── ROS connection ────────────────────────────────────────────────────────────
+const ROS_URL = 'ws://localhost:9090'
+let ros = null, reconnTimer = null
+
+function setDot (state) {
+  $('ros-dot').className = state
 }
 
-// ── VideoPanel ─────────────────────────────────────────────────────────────────
+function connect () {
+  if (ros) { try { ros.close() } catch (_) {} }
+  setDot('connecting')
+  ros = new ROSLIB.Ros({ url: ROS_URL })
+  ros.on('connection', () => { setDot('connected'); clearTimeout(reconnTimer); subscribe() })
+  ros.on('error',      () => { setDot('error');     sched() })
+  ros.on('close',      () => { setDot('error');     sched() })
+}
+function sched () { clearTimeout(reconnTimer); reconnTimer = setTimeout(connect, 3000) }
+function sub (name, type, cb) {
+  const t = new ROSLIB.Topic({ ros, name, messageType: type })
+  t.subscribe(cb)
+  return t
+}
 
-class VideoPanel {
-  constructor (canvasEl, label) {
-    this.canvas = canvasEl
-    this.ctx    = canvasEl.getContext('2d')
-    this.label  = label
-    this._mjpegImg = null
-    this._rafId    = null
+// ── subscriptions ─────────────────────────────────────────────────────────────
+function subscribe () {
+  // speed + heading
+  sub('/mavros/vfr_hud', 'mavros_msgs/VFR_HUD', m => {
+    S.speed   = m.airspeed   ?? 0
+    S.vspeed  = m.climb      ?? 0
+    S.heading = m.heading    ?? 0
+    pushHist(S.spdHistory,  S.speed)
+    pushHist(S.vspdHistory, S.vspeed)
+  })
 
-    bindCanvas(canvasEl)
-    canvasEl._onresize = () => this._draw()
-    this._draw()
-  }
+  // altitude
+  sub('/mavros/altitude', 'mavros_msgs/Altitude', m => {
+    S.altitude = m.relative ?? m.monotonic ?? 0
+    pushHist(S.altHistory, S.altitude)
+  })
 
-  _draw () {
-    const { canvas, ctx } = this
-    const w = canvas.width, h = canvas.height
-    if (!w || !h) return
+  // battery
+  sub('/mavros/battery', 'sensor_msgs/BatteryState', m => {
+    const raw = m.percentage ?? 0
+    S.battery.pct     = raw > 1 ? raw : raw * 100
+    S.battery.voltage = m.voltage ?? 0
+  })
 
-    if (this._mjpegImg && this._mjpegImg.complete && this._mjpegImg.naturalWidth) {
-      ctx.drawImage(this._mjpegImg, 0, 0, w, h)
-      return
+  // attitude (quaternion → euler)
+  sub('/mavros/imu/data', 'sensor_msgs/Imu', m => {
+    const q = m.orientation
+    S.roll  = Math.atan2(2*(q.w*q.x + q.y*q.z), 1 - 2*(q.x*q.x + q.y*q.y)) * R2D
+    S.pitch = Math.asin (clamp(2*(q.w*q.y - q.z*q.x), -1, 1)) * R2D
+    S.yaw   = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z)) * R2D
+  })
+
+  // velocity body frame
+  sub('/mavros/local_position/velocity_body', 'geometry_msgs/TwistStamped', m => {
+    S.vx = m.twist.linear.x ?? 0
+    S.vy = m.twist.linear.y ?? 0
+    S.vz = m.twist.linear.z ?? 0
+  })
+
+  // GPS
+  sub('/mavros/global_position/global', 'sensor_msgs/NavSatFix', m => {
+    S.gps.lat    = m.latitude
+    S.gps.lon    = m.longitude
+    S.gps.altAbs = m.altitude
+    if (S.trail.length === 0 ||
+        Math.abs(S.trail[S.trail.length-1].lat - m.latitude)  > 1e-7 ||
+        Math.abs(S.trail[S.trail.length-1].lon - m.longitude) > 1e-7) {
+      S.trail.push({ lat: m.latitude, lon: m.longitude })
+      if (S.trail.length > 500) S.trail.shift()
     }
+  })
 
-    // SMPTE colour-bar test pattern
-    const barW = w / TEST_BARS.length
-    const barH = Math.floor(h * 0.62)
-    TEST_BARS.forEach((clr, i) => {
-      ctx.fillStyle = clr
-      ctx.fillRect(Math.floor(i * barW), 0, Math.ceil(barW), barH)
-    })
-    ctx.fillStyle = '#0a0a0a'
-    ctx.fillRect(0, barH, w, h - barH)
+  // GPS status
+  sub('/mavros/gpsstatus', 'mavros_msgs/GPSRAW', m => {
+    S.gps.fix  = m.fix_type ?? 0
+    S.gps.sats = m.satellites_visible ?? 0
+  })
 
-    ctx.textAlign = 'center'
-    ctx.font      = 'bold 13px Monospace'
-    ctx.fillStyle = '#ffffff'
-    ctx.fillText('NO  SIGNAL', w / 2, h / 2 + 14)
+  // state (armed / mode)
+  sub('/mavros/state', 'mavros_msgs/State', m => {
+    if (m.armed && !S.armed) S.flightStart = Date.now()
+    if (!m.armed) S.flightStart = null
+    S.armed = m.armed
+    S.mode  = m.mode || '—'
+  })
 
-    ctx.font      = '8px Monospace'
-    ctx.fillStyle = C.accent
-    ctx.fillText(`[ ${this.label} ]`, w / 2, h / 2 + 30)
+  // motor throttle (PWM 1000-2000 → 0-100 %)
+  sub('/mavros/rc/out', 'mavros_msgs/RCOut', m => {
+    const ch = m.channels || []
+    for (let i = 0; i < 6; i++) {
+      const pwm = ch[i] ?? 1000
+      S.motors[i] = clamp((pwm - 1000) / 1000 * 100, 0, 100)
+    }
+  })
 
-    ctx.textAlign = 'left'
-    ctx.font      = '7px Monospace'
-    ctx.fillStyle = C.dim
-    ctx.fillText(this.label, 6, 14)
-  }
+  // LiDAR scan
+  sub('/scan', 'sensor_msgs/LaserScan', m => {
+    S.lidar = m
+    $('sl-pts').textContent   = m.ranges.length
+    $('sl-minr').textContent  = fmt2(m.range_min) + ' m'
+    $('sl-maxr').textContent  = fmt2(m.range_max) + ' m'
+    $('sl-astep').textContent = fmt2(m.angle_increment * R2D) + '°'
+    $('sl-status').textContent = 'Active'
+    $('sl-status').className   = 'sv ok'
+  })
 
-  // Connect to a MJPEG stream from web_video_server.
-  // Call this once when ros-jazzy-web-video-server is running on the Pi.
-  connectMJPEG (topicName) {
-    const url = `${VIDEO_BASE}${topicName}`
+  // Occupancy grid
+  sub('/map', 'nav_msgs/OccupancyGrid', m => {
+    S.occMap = m
+    $('sl-mw').textContent  = m.info.width + ' cells'
+    $('sl-mh').textContent  = m.info.height + ' cells'
+    $('sl-res').textContent = fmt2(m.info.resolution) + ' m/cell'
+    $('sl-ox').textContent  = fmt2(m.info.origin.position.x) + ' m'
+    $('sl-oy').textContent  = fmt2(m.info.origin.position.y) + ' m'
+  })
+
+  // SLAM pose
+  sub('/slam_toolbox/pose', 'geometry_msgs/PoseWithCovarianceStamped', m => {
+    const p = m.pose.pose
+    S.slamPose.x     = p.position.x
+    S.slamPose.y     = p.position.y
+    const q = p.orientation
+    S.slamPose.theta = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z)) * R2D
+    $('sl-x').textContent     = fmt2(S.slamPose.x) + ' m'
+    $('sl-y').textContent     = fmt2(S.slamPose.y) + ' m'
+    $('sl-theta').textContent = fmt1(S.slamPose.theta) + '°'
+  })
+
+  // Barcode detection (std_msgs/String carrying JSON or plain barcode string)
+  sub('/barcode/detection', 'std_msgs/String', m => {
+    let code = m.data, status = 'OK'
+    try { const j = JSON.parse(m.data); code = j.barcode || j.code || m.data; status = j.status || 'OK' } catch (_) {}
+    const entry = { code, status, time: now() }
+    S.barcodes.unshift(entry)
+    if (S.barcodes.length > 50) S.barcodes.pop()
+    S.detections.unshift({ label: 'Barcode', id: code, conf: '100%', time: entry.time })
+    if (S.detections.length > 100) S.detections.pop()
+    addDbLog(code, status)
+    updateDbTable()
+    updateDetectTable()
+  })
+
+  // Volumetry (std_msgs/String carrying JSON: {length,width,height,volume,confidence,object_id})
+  sub('/detection/volume', 'std_msgs/String', m => {
+    let vol = {}
+    try { vol = JSON.parse(m.data) } catch (_) { return }
+    const entry = {
+      length: vol.length     ?? 0,
+      width:  vol.width      ?? 0,
+      height: vol.height     ?? 0,
+      volume: vol.volume     ?? (vol.length * vol.width * vol.height) ?? 0,
+      conf:   vol.confidence ?? vol.conf ?? 0,
+      id:     vol.object_id  ?? vol.id   ?? '—',
+      time:   now(),
+    }
+    S.volumetry.unshift(entry)
+    if (S.volumetry.length > 50) S.volumetry.pop()
+    updateVolumetryPanel()
+    S.detections.unshift({ label: 'Volume', id: entry.id, conf: Math.round(entry.conf * 100) + '%', time: entry.time })
+    if (S.detections.length > 100) S.detections.pop()
+    updateDetectTable()
+  })
+
+  // Compressed camera frames
+  subCamImage('/camera/forward/image_raw/compressed',  'cam1',  'cam1-sig')
+  subCamImage('/camera/down/image_raw/compressed',     null,    null)  // downward used in img tab
+  subCamImage('/tracking/forward/compressed',          'icam1', 'icam1-sig')
+  subCamImage('/tracking/down/compressed',             'icam2', 'icam2-sig')
+}
+
+// Subscribe to a compressed image topic and draw to a canvas by id
+function subCamImage (topic, canvasId, sigId) {
+  if (!canvasId) return
+  sub(topic, 'sensor_msgs/CompressedImage', m => {
+    const canvas = $(canvasId)
+    if (!canvas) return
     const img = new Image()
-    img.onload = () => { this._mjpegImg = img; this._startLoop() }
-    img.onerror = () => { this._mjpegImg = null }
-    img.src = url
-  }
-
-  _startLoop () {
-    const tick = () => { this._draw(); this._rafId = requestAnimationFrame(tick) }
-    if (this._rafId) cancelAnimationFrame(this._rafId)
-    this._rafId = requestAnimationFrame(tick)
-  }
-
-  // For future sensor_msgs/Image callbacks decoded server-side:
-  updateFrame (imageBitmap) {
-    this._mjpegImg = imageBitmap
-    this._draw()
-  }
-}
-
-// ── NavMapPanel ────────────────────────────────────────────────────────────────
-
-class NavMapPanel {
-  constructor (canvasEl) {
-    this.canvas = canvasEl
-    this.ctx    = canvasEl.getContext('2d')
-    this.x      = 0
-    this.y      = 0
-    this.yaw    = 0
-    this.trail  = []
-    this.TRAIL_MAX = 300
-    this.SCALE     = 28  // pixels per metre
-
-    bindCanvas(canvasEl)
-    canvasEl._onresize = () => this._draw()
-    this._draw()
-  }
-
-  _toPx (x, y) {
-    const cx = this.canvas.width  / 2
-    const cy = this.canvas.height / 2
-    return [cx + x * this.SCALE, cy - y * this.SCALE]
-  }
-
-  _draw () {
-    const { canvas, ctx } = this
-    const w = canvas.width, h = canvas.height
-    if (!w || !h) return
-
-    ctx.fillStyle = C.bg
-    ctx.fillRect(0, 0, w, h)
-
-    // Grid
-    const cx = w / 2, cy = h / 2, s = this.SCALE
-    ctx.lineWidth = 1
-    for (let dx = -Math.ceil(w / s); dx <= Math.ceil(w / s); dx++) {
-      const gx = cx + dx * s
-      ctx.strokeStyle = dx === 0 ? C.dim : C.border
-      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke()
+    img.onload = () => {
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      URL.revokeObjectURL(img.src)
+      if (sigId) { const s = $(sigId); if (s) { s.textContent = 'LIVE'; s.className = 'cam-sig ok' } }
     }
-    for (let dy = -Math.ceil(h / s); dy <= Math.ceil(h / s); dy++) {
-      const gy = cy + dy * s
-      ctx.strokeStyle = dy === 0 ? C.dim : C.border
-      ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke()
-    }
+    img.src = 'data:image/jpeg;base64,' + m.data
+  })
+}
 
-    // North label
-    ctx.font = 'bold 9px Monospace'; ctx.fillStyle = C.accent; ctx.textAlign = 'left'
-    ctx.fillText('N ↑', cx + 4, 16)
+// ── history helper ────────────────────────────────────────────────────────────
+function pushHist (arr, v) {
+  arr.push(v)
+  if (arr.length > HIST_MAX) arr.shift()
+}
 
-    // Trail
-    if (this.trail.length >= 2) {
-      ctx.strokeStyle = C.trail; ctx.lineWidth = 1
-      ctx.beginPath()
-      this.trail.forEach(([tx, ty], i) => {
-        const [px, py] = this._toPx(tx, ty)
-        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)
-      })
-      ctx.stroke()
-    }
+// ── DOM updates (text/badges) ─────────────────────────────────────────────────
+function updateDOM () {
+  // header badges
+  const armEl = $('hdr-armed')
+  armEl.textContent = S.armed ? 'ARMED' : 'DISARMED'
+  armEl.className   = 'hdr-badge' + (S.armed ? ' armed' : '')
+  $('hdr-mode').textContent = S.mode
+  $('hdr-mode').className   = 'hdr-badge active'
 
-    // Drone dot
-    const [px, py] = this._toPx(this.x, this.y)
-    ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2)
-    ctx.fillStyle = C.green; ctx.fill()
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke()
+  const fixTxt = S.gps.fix >= 3 ? '3D FIX' : S.gps.fix >= 2 ? '2D FIX' : 'NO GPS'
+  const gpsEl  = $('hdr-gps')
+  gpsEl.textContent = fixTxt
+  gpsEl.className   = 'hdr-badge' + (S.gps.fix >= 3 ? ' ok' : '')
 
-    // Heading arrow
-    const ax = px + 15 * Math.cos(this.yaw - Math.PI / 2)
-    const ay = py + 15 * Math.sin(this.yaw - Math.PI / 2)
-    ctx.strokeStyle = C.green; ctx.lineWidth = 2
-    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ax, ay); ctx.stroke()
+  // dashboard KPIs
+  $('val-alt').textContent     = fmt1(S.altitude)
+  $('val-hdg').textContent     = Math.round(S.heading)
+  $('val-bat').textContent     = S.battery.pct > 0 ? Math.round(S.battery.pct) : '—'
+  $('val-volt').textContent    = S.battery.voltage > 0 ? fmt2(S.battery.voltage) + ' V' : '— V'
+  $('val-lat').textContent     = fmt6(S.gps.lat)
+  $('val-lon').textContent     = fmt6(S.gps.lon)
+  $('val-alt-abs').textContent = fmt1(S.gps.altAbs)
+  $('val-sats').textContent    = S.gps.sats || '—'
 
-    const ang = Math.atan2(ay - py, ax - px)
-    ctx.fillStyle = C.green; ctx.beginPath()
-    ctx.moveTo(ax, ay)
-    ctx.lineTo(ax - 8 * Math.cos(ang - 0.4), ay - 8 * Math.sin(ang - 0.4))
-    ctx.lineTo(ax - 8 * Math.cos(ang + 0.4), ay - 8 * Math.sin(ang + 0.4))
-    ctx.closePath(); ctx.fill()
+  const altBarPct = clamp(S.altitude / 120 * 100, 0, 100)
+  $('bar-alt').style.width = altBarPct + '%'
 
-    // Pending note
-    ctx.font = '7px Monospace'; ctx.fillStyle = C.dim; ctx.textAlign = 'left'
-    ctx.fillText('nav_msgs/Odometry  (pending — using /drone/pose)', 6, h - 6)
-  }
+  const pillArm  = $('pill-arm')
+  pillArm.textContent = S.armed ? 'ARMED' : 'DISARMED'
+  pillArm.className   = 'pill' + (S.armed ? ' armed' : '')
+  const pillMode = $('pill-mode')
+  pillMode.textContent = S.mode
+  pillMode.className   = 'pill active'
 
-  // Called from ROS /drone/pose callback (and future /slam/odom)
-  updatePose (x, y, yaw) {
-    this.x = x; this.y = y; this.yaw = yaw
-    this.trail.push([x, y])
-    if (this.trail.length > this.TRAIL_MAX) this.trail.shift()
-    this._draw()
+  // navigation view
+  $('nav-spd').textContent   = fmt1(S.speed)   + ' m/s'
+  $('nav-vspd').textContent  = fmt1(S.vspeed)  + ' m/s'
+  $('nav-alt').textContent   = fmt1(S.altitude) + ' m'
+  $('nav-hdg').textContent   = Math.round(S.heading) + '°'
+  $('nav-roll').textContent  = fmt1(S.roll)  + '°'
+  $('nav-pitch').textContent = fmt1(S.pitch) + '°'
+  $('nav-yaw').textContent   = fmt1(S.yaw)   + '°'
+  $('nav-vx').textContent    = fmt2(S.vx) + ' m/s'
+  $('nav-vy').textContent    = fmt2(S.vy) + ' m/s'
+  $('nav-vz').textContent    = fmt2(S.vz) + ' m/s'
+  $('nav-sats').textContent  = S.gps.sats || '—'
+  $('nav-fix').textContent   = fixTxt
+  $('nav-lat').textContent   = fmt6(S.gps.lat)
+  $('nav-lon').textContent   = fmt6(S.gps.lon)
+  $('nav-armed').textContent = S.armed ? 'ARMED' : 'DISARMED'
+  $('nav-mode').textContent  = S.mode
+
+  // flight timer
+  if (S.flightStart) {
+    const s = Math.floor((Date.now() - S.flightStart) / 1000)
+    const mm = String(Math.floor(s/60)).padStart(2,'0')
+    const ss = String(s % 60).padStart(2,'0')
+    $('nav-ftime').textContent = mm + ':' + ss
+  } else {
+    $('nav-ftime').textContent = '00:00'
   }
 }
 
-// ── SpeedGauge ─────────────────────────────────────────────────────────────────
-
-class SpeedGauge {
-  constructor (canvasEl) {
-    this.canvas = canvasEl
-    this.ctx    = canvasEl.getContext('2d')
-    this.value  = 0
-    this.MAX    = 10
-
-    bindCanvas(canvasEl)
-    canvasEl._onresize = () => this._draw()
-    this._draw()
+function updateDbTable () {
+  $('db-count').textContent = S.barcodes.length + ' record' + (S.barcodes.length !== 1 ? 's' : '')
+  const last = S.barcodes[0]
+  if (last) {
+    const el = $('db-last-code')
+    el.textContent = last.code
+    el.className   = 'bc-badge bc-new'
+    setTimeout(() => el.classList.remove('bc-new'), 900)
   }
-
-  _draw () {
-    const { canvas, ctx } = this
-    const w = canvas.width, h = canvas.height
-    if (!w || !h) return
-
-    ctx.fillStyle = C.panel; ctx.fillRect(0, 0, w, h)
-
-    const cx   = w / 2
-    const cy   = h * 0.58
-    const r    = Math.min(cx - 14, cy - 8) * 0.88
-    const frac = Math.min(this.value / this.MAX, 1)
-
-    // Background arc
-    ctx.beginPath(); ctx.arc(cx, cy, r, Math.PI, 0, false)
-    ctx.strokeStyle = C.border; ctx.lineWidth = 9; ctx.stroke()
-
-    // Value arc
-    if (frac > 0.005) {
-      const clr = frac < 0.6 ? C.green : frac < 0.85 ? C.orange : C.red
-      ctx.beginPath(); ctx.arc(cx, cy, r, Math.PI, Math.PI * (1 + frac), false)
-      ctx.strokeStyle = clr; ctx.lineWidth = 9; ctx.stroke()
-    }
-
-    // Needle
-    const angle = Math.PI * (1 + frac)
-    const nx = cx + r * 0.78 * Math.cos(angle)
-    const ny = cy + r * 0.78 * Math.sin(angle)
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(nx, ny); ctx.stroke()
-    ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2)
-    ctx.fillStyle = C.panel; ctx.fill()
-    ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1; ctx.stroke()
-
-    // Readout
-    ctx.textAlign = 'center'
-    ctx.font = 'bold 14px Monospace'; ctx.fillStyle = '#fff'
-    ctx.fillText(this.value.toFixed(1), cx, cy + 16)
-    ctx.font = '8px Monospace'; ctx.fillStyle = C.dim
-    ctx.fillText('m/s  SPEED', cx, cy + 30)
-
-    // Scale end-labels
-    ctx.font = '7px Monospace'; ctx.fillStyle = C.dim
-    ctx.textAlign = 'right'; ctx.fillText('0', cx - r - 2, cy + 5)
-    ctx.textAlign = 'left';  ctx.fillText(String(this.MAX), cx + r + 2, cy + 5)
-  }
-
-  setValue (v) { this.value = Math.max(0, v); this._draw() }
-}
-
-// ── AltitudeBar ────────────────────────────────────────────────────────────────
-
-class AltitudeBar {
-  constructor (fillEl, labelEl) {
-    this.fill  = fillEl
-    this.label = labelEl
-    this.MAX   = 10
-  }
-
-  setValue (v) {
-    const frac = Math.min(Math.max(v, 0) / this.MAX, 1)
-    this.fill.style.height     = `${frac * 100}%`
-    this.fill.style.background = frac < 0.8 ? C.accent : C.red
-    this.label.textContent     = `${v.toFixed(1)} m`
-  }
-}
-
-// ── BatteryBar ─────────────────────────────────────────────────────────────────
-
-class BatteryBar {
-  constructor (fillEl, labelEl) {
-    this.fill  = fillEl
-    this.label = labelEl
-  }
-
-  setValue (pct) {
-    pct = Math.min(Math.max(pct, 0), 100)
-    const clr    = pct > 30 ? C.green : pct > 15 ? C.orange : C.red
-    const blocks = Math.round(pct / 10)
-    this.fill.style.width      = `${pct}%`
-    this.fill.style.background = clr
-    this.label.style.color     = clr
-    this.label.textContent     = `${Math.round(pct)} %  ${'█'.repeat(blocks)}${'░'.repeat(10 - blocks)}`
-  }
-}
-
-// ── BarcodeLog ─────────────────────────────────────────────────────────────────
-
-class BarcodeLog {
-  constructor (tbodyEl, placeholderEl, scrollEl) {
-    this.tbody       = tbodyEl
-    this.placeholder = placeholderEl
-    this.scroll      = scrollEl
-  }
-
-  // Wire to the future barcode detection callback
-  addEntry (timestamp, barcode, shelf, row, confidence) {
-    this.placeholder.style.display = 'none'
+  const tbody = $('db-tbody')
+  tbody.innerHTML = ''
+  S.barcodes.slice(0, 20).forEach(r => {
     const tr = document.createElement('tr')
-    for (const val of [timestamp, barcode, shelf, row, confidence]) {
-      const td = document.createElement('td')
-      td.textContent = val
-      tr.appendChild(td)
+    tr.innerHTML = `<td style="font-family:monospace">${r.code}</td><td style="color:var(--muted)">${r.time}</td><td class="db-ok">${r.status}</td>`
+    tbody.appendChild(tr)
+  })
+}
+
+function updateDetectTable () {
+  const tbody = $('detect-tbody')
+  tbody.innerHTML = ''
+  S.detections.slice(0, 30).forEach(d => {
+    const tr = document.createElement('tr')
+    tr.innerHTML = `<td>${d.label}</td><td style="font-family:monospace">${d.id}</td><td style="color:var(--ok)">${d.conf}</td><td style="color:var(--muted)">${d.time}</td>`
+    tbody.appendChild(tr)
+  })
+}
+
+function addDbLog (code, status) {
+  const list = $('db-log-list')
+  const cls  = status === 'OK' ? 'log-ok' : 'log-warn'
+  const div  = document.createElement('div')
+  div.className = 'log-entry'
+  div.innerHTML = `<span class="log-time">${now()}</span><span class="log-msg ${cls}">DB INSERT → ${code} [${status}]</span>`
+  list.prepend(div)
+  while (list.children.length > 60) list.removeChild(list.lastChild)
+}
+
+function updateVolumetryPanel () {
+  const last = S.volumetry[0]
+  if (!last) return
+  $('vol-val').textContent   = last.volume.toFixed(4)
+  $('vol-l').textContent     = last.length.toFixed(3) + ' m'
+  $('vol-w').textContent     = last.width.toFixed(3)  + ' m'
+  $('vol-h').textContent     = last.height.toFixed(3) + ' m'
+  $('vol-count').textContent = S.volumetry.length
+  $('vol-conf').textContent  = Math.round(last.conf * 100) + '%'
+
+  const list = $('vol-log-list')
+  list.innerHTML = ''
+  S.volumetry.slice(0, 25).forEach(v => {
+    const div = document.createElement('div')
+    div.className = 'vol-entry'
+    div.innerHTML =
+      `<div class="vol-dims">${v.length.toFixed(2)}&times;${v.width.toFixed(2)}&times;${v.height.toFixed(2)} m &rarr; ${v.volume.toFixed(4)} m&sup3;</div>` +
+      `<div class="vol-time">${v.time} &middot; ${Math.round(v.conf * 100)}% conf &middot; ID: ${v.id}</div>`
+    list.appendChild(div)
+  })
+}
+
+// ── canvas drawing ────────────────────────────────────────────────────────────
+
+function drawSpeedometer () {
+  const canvas = $('gauge-speed')
+  if (!canvas) return
+  const W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d')
+  const cx = W/2, cy = H/2
+  const R  = Math.min(W,H) * 0.40
+  const SA = 210 * DEG          // start angle (7 o'clock)
+  const TA = 240 * DEG          // total arc
+  const MAX = 20                // m/s
+  const pct = clamp(S.speed / MAX, 0, 1)
+
+  ctx.clearRect(0, 0, W, H)
+
+  // track
+  ctx.beginPath(); ctx.arc(cx, cy, R, SA, SA+TA)
+  ctx.strokeStyle = '#2a2f3a'; ctx.lineWidth = 14; ctx.lineCap = 'round'; ctx.stroke()
+
+  // coloured fill arc
+  const speedColor = pct < 0.5 ? '#3ddc84' : pct < 0.75 ? '#f0a500' : '#e04040'
+  if (pct > 0) {
+    ctx.beginPath(); ctx.arc(cx, cy, R, SA, SA + pct * TA)
+    ctx.strokeStyle = speedColor; ctx.lineWidth = 14; ctx.lineCap = 'round'; ctx.stroke()
+  }
+
+  // tick marks
+  for (let i = 0; i <= MAX; i += 5) {
+    const a   = SA + (i/MAX)*TA
+    const cos = Math.cos(a), sin = Math.sin(a)
+    ctx.beginPath()
+    ctx.moveTo(cx + cos*(R-10), cy + sin*(R-10))
+    ctx.lineTo(cx + cos*(R+4),  cy + sin*(R+4))
+    ctx.strokeStyle = '#3a4050'; ctx.lineWidth = 1.5; ctx.lineCap = 'butt'; ctx.stroke()
+    ctx.fillStyle = '#5a6072'; ctx.font = '9px sans-serif'
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText(i, cx + Math.cos(a)*(R+15), cy + Math.sin(a)*(R+15))
+  }
+
+  // needle
+  const na  = SA + pct * TA
+  ctx.beginPath()
+  ctx.moveTo(cx - Math.cos(na)*12, cy - Math.sin(na)*12)
+  ctx.lineTo(cx + Math.cos(na)*(R-14), cy + Math.sin(na)*(R-14))
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.stroke()
+  ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI*2)
+  ctx.fillStyle = speedColor; ctx.fill()
+
+  // digital readout
+  ctx.fillStyle = '#cdd3de'
+  ctx.font = `bold ${Math.floor(W*0.17)}px 'Courier New',monospace`
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  ctx.fillText(S.speed.toFixed(1), cx, cy + R*0.28)
+  ctx.fillStyle = '#5a6072'; ctx.font = '10px sans-serif'
+  ctx.fillText('m/s', cx, cy + R*0.52)
+}
+
+function drawBatteryArc () {
+  const canvas = $('gauge-battery')
+  if (!canvas) return
+  const W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d')
+  const cx = W/2, cy = H/2 + 4, R = Math.min(W,H)*0.36
+  const SA = 210*DEG, TA = 240*DEG
+  const pct = clamp(S.battery.pct / 100, 0, 1)
+  const col = pct > 0.5 ? '#3ddc84' : pct > 0.2 ? '#f0a500' : '#e04040'
+
+  ctx.clearRect(0,0,W,H)
+  ctx.beginPath(); ctx.arc(cx,cy,R,SA,SA+TA)
+  ctx.strokeStyle = '#2a2f3a'; ctx.lineWidth = 8; ctx.lineCap = 'round'; ctx.stroke()
+  if (pct > 0) {
+    ctx.beginPath(); ctx.arc(cx,cy,R,SA,SA+pct*TA)
+    ctx.strokeStyle = col; ctx.lineWidth = 8; ctx.lineCap = 'round'; ctx.stroke()
+  }
+  ctx.fillStyle = col; ctx.font = 'bold 13px monospace'
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  ctx.fillText(Math.round(S.battery.pct)+'%', cx, cy)
+}
+
+function drawMotor (id, pct) {
+  const canvas = $(id)
+  if (!canvas) return
+  const W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d')
+  const cx = W/2, cy = H/2, R = Math.min(W,H)*0.38
+  const SA = 225*DEG, TA = 270*DEG
+  const col = pct < 60 ? '#3ddc84' : pct < 80 ? '#f0a500' : '#e04040'
+
+  ctx.clearRect(0,0,W,H)
+  ctx.beginPath(); ctx.arc(cx,cy,R,SA,SA+TA)
+  ctx.strokeStyle = '#2a2f3a'; ctx.lineWidth = 9; ctx.lineCap = 'round'; ctx.stroke()
+  if (pct > 0) {
+    ctx.beginPath(); ctx.arc(cx,cy,R,SA,SA+(pct/100)*TA)
+    ctx.strokeStyle = col; ctx.lineWidth = 9; ctx.lineCap = 'round'; ctx.stroke()
+  }
+  // RPM indicator dots
+  const dots = 6
+  for (let i = 0; i < dots; i++) {
+    const a   = (i/dots)*Math.PI*2 - Math.PI/2
+    const r2  = R - 14
+    const lit = i < Math.round((pct/100)*dots)
+    ctx.beginPath(); ctx.arc(cx+Math.cos(a)*r2, cy+Math.sin(a)*r2, 2.5, 0, Math.PI*2)
+    ctx.fillStyle = lit ? col : '#2a2f3a'; ctx.fill()
+  }
+  ctx.fillStyle = '#cdd3de'; ctx.font = 'bold 13px monospace'
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  ctx.fillText(Math.round(pct)+'%', cx, cy)
+}
+
+function drawMap () {
+  const canvas = $('map-canvas')
+  const wrap   = $('map-wrap')
+  if (!canvas || !wrap) return
+  const W = wrap.clientWidth, H = wrap.clientHeight - 24  // subtract ph height
+  if (W < 10 || H < 10) return
+  canvas.width = W; canvas.height = H
+  const ctx = canvas.getContext('2d')
+
+  ctx.fillStyle = '#0d1520'; ctx.fillRect(0,0,W,H)
+
+  // grid
+  ctx.strokeStyle = '#162030'; ctx.lineWidth = 1
+  const step = 40
+  for (let x = 0; x < W; x += step) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke() }
+  for (let y = 0; y < H; y += step) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke() }
+
+  // compass labels
+  ctx.fillStyle = '#2e3a4a'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center'
+  ctx.fillText('N', W/2, 12); ctx.fillText('S', W/2, H-4)
+  ctx.textAlign = 'left';  ctx.fillText('W', 4,   H/2+4)
+  ctx.textAlign = 'right'; ctx.fillText('E', W-4, H/2+4)
+
+  if (!S.gps.lat) {
+    ctx.fillStyle = '#5a6072'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'
+    ctx.fillText('Awaiting GPS…', W/2, H/2); return
+  }
+
+  const cx = W/2, cy = H/2
+  const scale = Math.min(W,H) / 2 / 0.0018  // ~200 m radius
+  const proj  = (lat, lon) => ({
+    x: cx + (lon - S.gps.lon) * scale,
+    y: cy - (lat - S.gps.lat) * scale,
+  })
+
+  // trail
+  if (S.trail.length > 1) {
+    ctx.beginPath()
+    S.trail.forEach((pt, i) => {
+      const p = proj(pt.lat, pt.lon)
+      i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)
+    })
+    ctx.strokeStyle = 'rgba(77,159,255,.5)'; ctx.lineWidth = 1.5; ctx.stroke()
+  }
+
+  // home cross
+  if (S.trail.length > 0) {
+    const h = proj(S.trail[0].lat, S.trail[0].lon)
+    ctx.strokeStyle = '#3ddc84'; ctx.lineWidth = 1.5
+    ctx.beginPath(); ctx.moveTo(h.x-6,h.y); ctx.lineTo(h.x+6,h.y); ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(h.x,h.y-6); ctx.lineTo(h.x,h.y+6); ctx.stroke()
+  }
+
+  // drone marker
+  ctx.beginPath(); ctx.arc(cx,cy,6,0,Math.PI*2)
+  ctx.fillStyle = '#4d9fff'; ctx.fill()
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
+
+  // heading ray
+  const ha = (S.heading - 90) * DEG
+  ctx.beginPath()
+  ctx.moveTo(cx, cy)
+  ctx.lineTo(cx + Math.cos(ha)*18, cy + Math.sin(ha)*18)
+  ctx.strokeStyle = '#f0a500'; ctx.lineWidth = 1.5; ctx.stroke()
+}
+
+function drawHorizon () {
+  const canvas = $('horizon-canvas')
+  if (!canvas) return
+  const W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d')
+  const cx = W/2, cy = H/2, R = Math.min(W,H)*0.44
+
+  ctx.clearRect(0,0,W,H)
+
+  // clip circle
+  ctx.save()
+  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.clip()
+
+  // pitch offset: 4px per degree
+  const pitchOff = S.pitch * 4
+  ctx.save()
+  ctx.translate(cx,cy); ctx.rotate(-S.roll*DEG)
+
+  // sky
+  ctx.fillStyle = '#1a3a6a'
+  ctx.fillRect(-R, -R - pitchOff, R*2, R*2)
+  // ground
+  ctx.fillStyle = '#4a2e0a'
+  ctx.fillRect(-R, -pitchOff, R*2, R*2)
+  // horizon line
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5
+  ctx.beginPath(); ctx.moveTo(-R*1.2, -pitchOff); ctx.lineTo(R*1.2, -pitchOff); ctx.stroke()
+
+  // pitch lines
+  for (let p = -30; p <= 30; p += 10) {
+    if (p === 0) continue
+    const y = -pitchOff - p*4
+    const w = p % 20 === 0 ? 40 : 24
+    ctx.beginPath(); ctx.moveTo(-w,-y+pitchOff*0-p*4); ctx.lineTo(w,y-(-pitchOff)*0+p*4)
+    // simplified: just horizontal marks at pitch offsets
+    ctx.beginPath(); ctx.moveTo(-w, -p*4-pitchOff); ctx.lineTo(w, -p*4-pitchOff)
+    ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1; ctx.stroke()
+    ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.font = '8px sans-serif'
+    ctx.textAlign = 'right'; ctx.fillText(p+'°', -w-3, -p*4-pitchOff+3)
+  }
+  ctx.restore()
+  ctx.restore()
+
+  // outer ring
+  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2)
+  ctx.strokeStyle = '#3a4050'; ctx.lineWidth = 2; ctx.stroke()
+
+  // fixed aircraft symbol
+  ctx.strokeStyle = '#f0a500'; ctx.lineWidth = 2.5; ctx.lineCap = 'round'
+  ctx.beginPath(); ctx.moveTo(cx-30,cy); ctx.lineTo(cx-10,cy); ctx.stroke()
+  ctx.beginPath(); ctx.moveTo(cx+10,cy); ctx.lineTo(cx+30,cy); ctx.stroke()
+  ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2)
+  ctx.fillStyle = '#f0a500'; ctx.fill()
+
+  // roll arc at top
+  const rollR = R - 8
+  const rollA = S.roll * DEG
+  ctx.save(); ctx.translate(cx,cy)
+  // roll tick
+  ctx.strokeStyle = '#f0a500'; ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(Math.cos(-Math.PI/2+rollA)*(rollR-8), Math.sin(-Math.PI/2+rollA)*(rollR-8))
+  ctx.lineTo(Math.cos(-Math.PI/2+rollA)*(rollR+4), Math.sin(-Math.PI/2+rollA)*(rollR+4))
+  ctx.stroke()
+  ctx.restore()
+
+  // readout
+  ctx.fillStyle = '#cdd3de'; ctx.font = '10px monospace'; ctx.textAlign = 'center'
+  ctx.fillText('R ' + fmt1(S.roll) + '°  P ' + fmt1(S.pitch) + '°', cx, cy+R+14)
+}
+
+function drawCompass () {
+  const canvas = $('compass-canvas')
+  if (!canvas) return
+  const W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d')
+  const cx = W/2, cy = H/2, R = Math.min(W,H)*0.40
+
+  ctx.clearRect(0,0,W,H)
+
+  // background circle
+  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2)
+  ctx.fillStyle = '#161a22'; ctx.fill()
+  ctx.strokeStyle = '#3a4050'; ctx.lineWidth = 1.5; ctx.stroke()
+
+  // cardinal labels
+  const cardinals = ['N','NE','E','SE','S','SW','W','NW']
+  cardinals.forEach((c,i) => {
+    const a = (i/8)*Math.PI*2 - Math.PI/2
+    const r = R - 16
+    ctx.fillStyle = c === 'N' ? '#e04040' : '#5a6072'
+    ctx.font = (c.length === 1 ? 'bold 11px' : '9px') + ' sans-serif'
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText(c, cx+Math.cos(a)*r, cy+Math.sin(a)*r)
+  })
+
+  // degree ticks
+  for (let d = 0; d < 360; d += 5) {
+    const a   = d*DEG - Math.PI/2
+    const len = d % 30 === 0 ? 10 : 5
+    ctx.beginPath()
+    ctx.moveTo(cx+Math.cos(a)*(R-2),   cy+Math.sin(a)*(R-2))
+    ctx.lineTo(cx+Math.cos(a)*(R-len), cy+Math.sin(a)*(R-len))
+    ctx.strokeStyle = d % 30 === 0 ? '#4a5060' : '#2a2f3a'; ctx.lineWidth = 1; ctx.stroke()
+  }
+
+  // heading needle
+  const ha = S.heading*DEG - Math.PI/2
+  ctx.beginPath()
+  ctx.moveTo(cx, cy)
+  ctx.lineTo(cx+Math.cos(ha)*(R-20), cy+Math.sin(ha)*(R-20))
+  ctx.strokeStyle = '#e04040'; ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.stroke()
+
+  // tail
+  ctx.beginPath()
+  ctx.moveTo(cx, cy)
+  ctx.lineTo(cx-Math.cos(ha)*18, cy-Math.sin(ha)*18)
+  ctx.strokeStyle = '#4d9fff'; ctx.lineWidth = 2; ctx.stroke()
+
+  // center dot
+  ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2)
+  ctx.fillStyle = '#cdd3de'; ctx.fill()
+
+  // heading text
+  ctx.fillStyle = '#cdd3de'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'center'
+  ctx.fillText(Math.round(S.heading)+'°', cx, cy+R+14)
+}
+
+function drawChart (canvasId, history, color, unit, maxVal) {
+  const canvas = $(canvasId)
+  if (!canvas) return
+  const W = canvas.width, H = canvas.height, ctx = canvas.getContext('2d')
+  ctx.clearRect(0,0,W,H)
+  ctx.fillStyle = '#0f1318'; ctx.fillRect(0,0,W,H)
+
+  if (history.length < 2) return
+
+  const pad = { t:14, b:18, l:32, r:8 }
+  const gW  = W - pad.l - pad.r
+  const gH  = H - pad.t - pad.b
+
+  const max = maxVal || Math.max(...history, 1)
+  const min = Math.min(...history, 0)
+  const range = max - min || 1
+
+  // grid lines
+  ctx.strokeStyle = '#1e2530'; ctx.lineWidth = 1
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + (i/4)*gH
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W-pad.r, y); ctx.stroke()
+    const v = max - (i/4)*range
+    ctx.fillStyle = '#4a5060'; ctx.font = '9px monospace'; ctx.textAlign = 'right'
+    ctx.fillText(v.toFixed(1), pad.l-3, y+3)
+  }
+
+  // line
+  ctx.beginPath()
+  history.forEach((v, i) => {
+    const x = pad.l + (i/(HIST_MAX-1))*gW
+    const y = pad.t + (1-(v-min)/range)*gH
+    i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y)
+  })
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke()
+
+  // fill
+  ctx.lineTo(pad.l + ((history.length-1)/(HIST_MAX-1))*gW, pad.t+gH)
+  ctx.lineTo(pad.l, pad.t+gH)
+  ctx.closePath()
+  ctx.fillStyle = color.replace(')',', 0.15)').replace('rgb','rgba').replace('#', 'rgba(').concat(')')
+  // simple fill with low opacity
+  ctx.globalAlpha = 0.12; ctx.fillStyle = color; ctx.fill(); ctx.globalAlpha = 1
+
+  // current value label
+  const last = history[history.length-1]
+  ctx.fillStyle = color; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'right'
+  ctx.fillText(fmt1(last) + (unit?' '+unit:''), W-pad.r, pad.t-3)
+}
+
+function drawSLAM () {
+  const canvas = $('slam-canvas')
+  const wrap   = $('slam-main')
+  if (!canvas || !wrap) return
+  const W = wrap.clientWidth, H = wrap.clientHeight - 26
+  if (W < 10 || H < 10) return
+  canvas.width = W; canvas.height = H
+  const ctx = canvas.getContext('2d')
+
+  ctx.fillStyle = '#0a0e14'; ctx.fillRect(0,0,W,H)
+
+  const cx = W/2, cy = H/2
+
+  // occupancy grid
+  if (S.occMap) {
+    const { info, data } = S.occMap
+    const cellPx = Math.min(W / info.width, H / info.height)
+    const offX = cx - (info.width  * cellPx) / 2
+    const offY = cy - (info.height * cellPx) / 2
+    for (let r = 0; r < info.height; r++) {
+      for (let c = 0; c < info.width; c++) {
+        const v = data[r * info.width + c]
+        if (v < 0) continue
+        ctx.fillStyle = v === 0 ? '#1a2030' : `rgb(${255-v*2},${255-v*2},${255-v*2})`
+        ctx.fillRect(offX + c*cellPx, offY + (info.height-1-r)*cellPx, cellPx, cellPx)
+      }
     }
-    this.tbody.appendChild(tr)
-    this.scroll.scrollTop = this.scroll.scrollHeight
+  } else {
+    // placeholder grid
+    ctx.strokeStyle = '#162030'; ctx.lineWidth = 1
+    for (let x = 0; x < W; x += 30) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke() }
+    for (let y = 0; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke() }
+    ctx.fillStyle = '#2a3040'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center'
+    ctx.fillText('Waiting for /map topic…', cx, cy-10)
+  }
+
+  // LiDAR scan overlay
+  if (S.lidar) {
+    const m      = S.lidar
+    const scale  = 60            // px per metre
+    const ox     = cx + S.slamPose.x * scale
+    const oy     = cy - S.slamPose.y * scale
+    const theta  = S.slamPose.theta * DEG
+
+    ctx.save()
+    ctx.translate(ox, oy)
+    ctx.rotate(theta)
+    ctx.fillStyle = 'rgba(77,159,255,.7)'
+    m.ranges.forEach((r, i) => {
+      if (!isFinite(r) || r < m.range_min || r > m.range_max) return
+      const a = m.angle_min + i * m.angle_increment
+      const px = Math.cos(a) * r * scale
+      const py = -Math.sin(a) * r * scale
+      ctx.beginPath(); ctx.arc(px, py, 1.5, 0, Math.PI*2); ctx.fill()
+    })
+    ctx.restore()
+
+    // robot marker
+    ctx.beginPath(); ctx.arc(ox, oy, 7, 0, Math.PI*2)
+    ctx.fillStyle = '#4d9fff'; ctx.fill()
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
+    // heading ray
+    const ra = theta - Math.PI/2
+    ctx.beginPath(); ctx.moveTo(ox,oy)
+    ctx.lineTo(ox+Math.cos(ra)*20, oy+Math.sin(ra)*20)
+    ctx.strokeStyle = '#f0a500'; ctx.lineWidth = 2; ctx.stroke()
+  } else {
+    ctx.fillStyle = '#3a4050'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'
+    ctx.fillText('Waiting for /scan topic…', cx, cy+20)
   }
 }
 
-// ── GCS App ───────────────────────────────────────────────────────────────────
-
-class GCSApp {
-  constructor () {
-    this._ros     = null
-    this._subs    = []
-    this._widgets = this._buildWidgets()
-    this._connect()
-  }
-
-  _buildWidgets () {
-    return {
-      cam1:  new VideoPanel(document.getElementById('cam1-canvas'), 'CAM FRONT'),
-      cam2:  new VideoPanel(document.getElementById('cam2-canvas'), 'CAM DOWN'),
-      nav:   new NavMapPanel(document.getElementById('nav-canvas')),
-      speed: new SpeedGauge(document.getElementById('speed-canvas')),
-      alt:   new AltitudeBar(
-        document.getElementById('alt-fill'),
-        document.getElementById('alt-label'),
-      ),
-      bat: new BatteryBar(
-        document.getElementById('bat-fill'),
-        document.getElementById('bat-label'),
-      ),
-      log: new BarcodeLog(
-        document.getElementById('log-tbody'),
-        document.getElementById('log-placeholder'),
-        document.getElementById('log-scroll'),
-      ),
-    }
-  }
-
-  _setStatus (text, colour) {
-    const el = document.getElementById('status')
-    el.textContent = text
-    el.style.color = colour
-  }
-
-  // ── ROS connection ──────────────────────────────────────────────────────────
-
-  _connect () {
-    this._setStatus('● CONNECTING…', C.orange)
-
-    this._ros = new ROSLIB.Ros({ url: WS_URL })  // eslint-disable-line no-undef
-
-    this._ros.on('connection', () => {
-      this._setStatus('● ONLINE', C.green)
-      this._subscribe()
-    })
-
-    this._ros.on('error', (err) => {
-      console.error('[GCS] rosbridge error', err)
-      this._setStatus('● ERROR', C.red)
-    })
-
-    this._ros.on('close', () => {
-      this._setStatus('● OFFLINE — reconnecting…', C.red)
-      this._subs = []
-      setTimeout(() => this._connect(), RECONNECT_MS)
-    })
-  }
-
-  // ── Topic subscriptions ─────────────────────────────────────────────────────
-
-  _sub (name, type, cb) {
-    const topic = new ROSLIB.Topic({ ros: this._ros, name, messageType: type })  // eslint-disable-line no-undef
-    topic.subscribe(cb)
-    this._subs.push(topic)
-    return topic
-  }
-
-  _subscribe () {
-    const w = this._widgets
-
-    // /drone/pose → nav map, altitude, header pose display
-    this._sub(T_POSE, 'std_msgs/Float32MultiArray', (msg) => {
-      const [x, y, z, yaw = 0] = msg.data
-      w.nav.updatePose(x, y, yaw)
-      w.alt.setValue(z)
-      document.getElementById('pose-display').textContent =
-        `Pose  X:${x.toFixed(2)}  Y:${y.toFixed(2)}  Z:${z.toFixed(2)}` +
-        `  Yaw:${(yaw * 180 / Math.PI).toFixed(1)}°`
-    })
-
-    // /drone/cmd_vel → speed gauge (magnitude of linear velocity)
-    this._sub(T_VEL, 'geometry_msgs/Twist', (msg) => {
-      const { x, y, z } = msg.linear
-      w.speed.setValue(Math.sqrt(x * x + y * y + z * z))
-    })
-
-    // ── Stub subscriptions — uncomment one by one as topics go live ───────────
-
-    // /slam/odom → nav map (replaces /drone/pose for the map)
-    // this._sub(T_ODOM, 'nav_msgs/Odometry', (msg) => {
-    //   const p   = msg.pose.pose.position
-    //   const q   = msg.pose.pose.orientation
-    //   const yaw = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z))
-    //   w.nav.updatePose(p.x, p.y, yaw)
-    // })
-
-    // /sensor/battery → battery bar
-    // this._sub(T_BATTERY, 'std_msgs/Float32', (msg) => {
-    //   w.bat.setValue(msg.data)
-    // })
-
-    // Camera MJPEG streams (requires ros-jazzy-web-video-server on the Pi)
-    // w.cam1.connectMJPEG(T_CAM_FRONT)
-    // w.cam2.connectMJPEG(T_CAM_DOWN)
-  }
+// Test pattern for cameras without a live feed
+function drawTestPattern (canvasId, hue) {
+  const canvas = $(canvasId)
+  if (!canvas) return
+  const parent = canvas.parentElement
+  const W = parent ? parent.clientWidth  || 640 : 640
+  const H = parent ? parent.clientHeight || 360 : 360
+  canvas.width = W; canvas.height = H
+  const ctx = canvas.getContext('2d')
+  const bars = [0, 60, 120, 180, 240, 300, 360, 'white', 'black']
+  const bw   = W / bars.length
+  bars.forEach((h, i) => {
+    ctx.fillStyle = typeof h === 'string' ? h : `hsl(${(h+hue)%360},80%,50%)`
+    ctx.fillRect(i*bw, 0, bw, H*0.72)
+  })
+  const g = ctx.createLinearGradient(0,0,W,0)
+  g.addColorStop(0,'#000'); g.addColorStop(1,'#fff')
+  ctx.fillStyle = g; ctx.fillRect(0, H*0.72, W, H*0.28)
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(W/2-90,H/2-16,180,32)
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center'
+  ctx.fillText('NO VIDEO SIGNAL', W/2, H/2+4)
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
+// ── canvas resize ─────────────────────────────────────────────────────────────
+function resizeCanvases () {
+  const ro = new ResizeObserver(() => {
+    ;['cam1','icam1','icam2','horizon-canvas','compass-canvas',
+      'chart-alt','chart-spd','chart-vspd'].forEach(id => {
+      const c = $(id)
+      if (!c || !c.parentElement) return
+      const p = c.parentElement
+      c.width  = p.clientWidth
+      c.height = p.clientHeight
+    })
+    drawMap()
+    drawSLAM()
+  })
+  ;['cam-col','img-left','img-cams','nav-top','nav-charts','slam-main'].forEach(id => {
+    const el = $(id)
+    if (el) ro.observe(el)
+  })
+}
 
-window.addEventListener('DOMContentLoaded', () => {
-  window._gcs = new GCSApp()
+// ── main animation loop ───────────────────────────────────────────────────────
+function frame () {
+  updateDOM()
+  drawSpeedometer()
+  drawBatteryArc()
+  S.motors.forEach((m, i) => drawMotor('motor-' + (i+1), m))
+  drawMap()
+
+  if (S.activeView === 'navigation') {
+    drawHorizon()
+    drawCompass()
+    drawChart('chart-alt',  S.altHistory,  '#4d9fff', 'm')
+    drawChart('chart-spd',  S.spdHistory,  '#3ddc84', 'm/s')
+    drawChart('chart-vspd', S.vspdHistory, '#f0a500', 'm/s')
+  }
+  if (S.activeView === 'slam') {
+    drawSLAM()
+  }
+
+  requestAnimationFrame(frame)
+}
+
+// ── boot ──────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  drawTestPattern('cam1',  0)
+  drawTestPattern('icam1', 0)
+  drawTestPattern('icam2', 120)
+  resizeCanvases()
+  connect()
+  frame()
 })
