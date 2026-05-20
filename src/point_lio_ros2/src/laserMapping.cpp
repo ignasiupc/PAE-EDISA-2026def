@@ -76,6 +76,9 @@ nav_msgs::msg::Path path;
 nav_msgs::msg::Odometry odomAftMapped;
 geometry_msgs::msg::PoseStamped msg_body_pose;
 
+// Publisher global para /slam/pose (PoseStamped para telemetría)
+rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pubSlamPose;
+
 auto logger = rclcpp::get_logger("laserMapping");
 
 void SigHandle(int sig) {
@@ -673,6 +676,12 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
 
     pubOdomAftMapped->publish(odomAftMapped);
 
+    // Publicar también como PoseStamped en /slam/pose para la telemetría
+    geometry_msgs::msg::PoseStamped slam_pose_msg;
+    slam_pose_msg.header = odomAftMapped.header;
+    slam_pose_msg.pose = odomAftMapped.pose.pose;
+    pubSlamPose->publish(slam_pose_msg);
+
     //static tf2_ros::TransformBroadcaster br = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
     geometry_msgs::msg::TransformStamped transform;
     transform.header.frame_id = odom_header_frame_id;
@@ -808,8 +817,11 @@ int main(int argc, char **argv) {
                 ("/odom_corrected", 100000);
     } else {
         pubOdomAftMapped = nh->create_publisher<nav_msgs::msg::Odometry>
-                ("/aft_mapped_to_init", 100000);
+                ("/slam/odom", 100000);
     }
+
+    // Publisher PoseStamped en /slam/pose (telemetría y sim_slam usan este topic)
+    pubSlamPose = nh->create_publisher<geometry_msgs::msg::PoseStamped>("/slam/pose", 100000);
 
     //auto plane_pub = nh->create_publisher<visualization_msgs::msg::Marker>
     //        ("/planner_normal", 1000);
