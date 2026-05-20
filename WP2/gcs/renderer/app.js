@@ -461,38 +461,45 @@ function subscribe () {
     }
   })
 
-  // LiDAR scan
-  sub('/scan', 'sensor_msgs/LaserScan', m => {
-    S.lidar = m
-    $('sl-pts').textContent   = m.ranges.length
-    $('sl-minr').textContent  = fmt2(m.range_min) + ' m'
-    $('sl-maxr').textContent  = fmt2(m.range_max) + ' m'
-    $('sl-astep').textContent = fmt2(m.angle_increment * R2D) + '°'
+  // Point-LIO — nube de puntos registrada (frame camera_init)
+  sub('/cloud_registered', 'sensor_msgs/PointCloud2', m => {
+    S.lidar = m   // guardamos para drawSLAM
+    const pts = m.width * m.height
+    $('sl-pts').textContent  = pts
+    $('sl-minr').textContent  = '—'
+    $('sl-maxr').textContent  = '—'
+    $('sl-astep').textContent = '3D'
     $('sl-status').textContent = 'Active'
     $('sl-status').className   = 'sv ok'
   })
 
-  // Occupancy grid
-  sub('/map', 'nav_msgs/OccupancyGrid', m => {
-    S.occMap = m
-    $('sl-mw').textContent  = m.info.width + ' cells'
-    $('sl-mh').textContent  = m.info.height + ' cells'
-    $('sl-res').textContent = fmt2(m.info.resolution) + ' m/cell'
-    $('sl-ox').textContent  = fmt2(m.info.origin.position.x) + ' m'
-    $('sl-oy').textContent  = fmt2(m.info.origin.position.y) + ' m'
-  })
-
-  // SLAM pose
-  sub('/slam_toolbox/pose', 'geometry_msgs/PoseWithCovarianceStamped', m => {
+  // Point-LIO — odometría (/Odometry si existe, fallback por TF)
+  sub('/Odometry', 'nav_msgs/Odometry', m => {
     const p = m.pose.pose
-    S.slamPose.x     = p.position.x
-    S.slamPose.y     = p.position.y
+    S.slamPose.x = p.position.x
+    S.slamPose.y = p.position.y
     const q = p.orientation
     S.slamPose.theta = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z)) * R2D
-    $('sl-x').textContent     = fmt2(S.slamPose.x) + ' m'
-    $('sl-y').textContent     = fmt2(S.slamPose.y) + ' m'
-    $('sl-theta').textContent = fmt1(S.slamPose.theta) + '°'
+    updateSlamPoseUI()
   })
+
+  // TF camera_init → aft_mapped (fuente principal de pose en Point-LIO)
+  try {
+    const tfClient = new ROSLIB.TFClient({
+      ros,
+      fixedFrame: 'camera_init',
+      angularThres: 0.01,
+      transThres:   0.01,
+      rate:         10.0,
+    })
+    tfClient.subscribe('aft_mapped', tf => {
+      S.slamPose.x = tf.translation.x
+      S.slamPose.y = tf.translation.y
+      const q = tf.rotation
+      S.slamPose.theta = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z)) * R2D
+      updateSlamPoseUI()
+    })
+  } catch (_) {}
 
   // Barcode detection (std_msgs/String carrying JSON or plain barcode string)
   sub('/barcode/detection', 'std_msgs/String', m => {
@@ -1116,6 +1123,43 @@ function drawChart (canvasId, history, color, unit, maxVal) {
   ctx.fillText(fmt1(last) + (unit?' '+unit:''), W-pad.r, pad.t-3)
 }
 
+function updateSlamPoseUI () {
+  $('sl-x').textContent     = fmt2(S.slamPose.x) + ' m'
+  $('sl-y').textContent     = fmt2(S.slamPose.y) + ' m'
+  $('sl-theta').textContent = fmt1(S.slamPose.theta) + '°'
+}
+
+// Decode PointCloud2 binary data → array of {x,y} for top-down 2D projection
+function decodePC2xy (msg) {
+  const raw = atob(msg.data)
+  const buf = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i)
+
+  let xOff = 0, yOff = 4
+  if (msg.fields) {
+    msg.fields.forEach(f => {
+      if (f.name === 'x') xOff = f.offset
+      if (f.name === 'y') yOff = f.offset
+    })
+  }
+
+  const step = msg.point_step || 16
+  const count = (msg.width || 0) * (msg.height || 1)
+  const le = !msg.is_bigendian
+  const view = new DataView(buf.buffer)
+  const pts = []
+  // Subsample to max 4000 points for canvas performance
+  const stride = Math.max(1, Math.floor(count / 4000))
+  for (let i = 0; i < count; i += stride) {
+    const base = i * step
+    if (base + yOff + 4 > buf.length) break
+    const x = view.getFloat32(base + xOff, le)
+    const y = view.getFloat32(base + yOff, le)
+    if (isFinite(x) && isFinite(y) && (x !== 0 || y !== 0)) pts.push({ x, y })
+  }
+  return pts
+}
+
 function drawSLAM () {
   const canvas = $('slam-canvas')
   const wrap   = $('slam-main')
@@ -1129,63 +1173,40 @@ function drawSLAM () {
 
   const cx = W/2, cy = H/2
 
-  // occupancy grid
-  if (S.occMap) {
-    const { info, data } = S.occMap
-    const cellPx = Math.min(W / info.width, H / info.height)
-    const offX = cx - (info.width  * cellPx) / 2
-    const offY = cy - (info.height * cellPx) / 2
-    for (let r = 0; r < info.height; r++) {
-      for (let c = 0; c < info.width; c++) {
-        const v = data[r * info.width + c]
-        if (v < 0) continue
-        ctx.fillStyle = v === 0 ? '#1a2030' : `rgb(${255-v*2},${255-v*2},${255-v*2})`
-        ctx.fillRect(offX + c*cellPx, offY + (info.height-1-r)*cellPx, cellPx, cellPx)
-      }
-    }
-  } else {
-    // placeholder grid
-    ctx.strokeStyle = '#162030'; ctx.lineWidth = 1
-    for (let x = 0; x < W; x += 30) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke() }
-    for (let y = 0; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke() }
-    ctx.fillStyle = '#2a3040'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center'
-    ctx.fillText('Waiting for /map topic…', cx, cy-10)
-  }
+  // Background grid
+  ctx.strokeStyle = '#162030'; ctx.lineWidth = 1
+  for (let x = 0; x < W; x += 30) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke() }
+  for (let y = 0; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke() }
 
-  // LiDAR scan overlay
-  if (S.lidar) {
-    const m      = S.lidar
-    const scale  = 60            // px per metre
-    const ox     = cx + S.slamPose.x * scale
-    const oy     = cy - S.slamPose.y * scale
-    const theta  = S.slamPose.theta * DEG
-
-    ctx.save()
-    ctx.translate(ox, oy)
-    ctx.rotate(theta)
-    ctx.fillStyle = 'rgba(77,159,255,.7)'
-    m.ranges.forEach((r, i) => {
-      if (!isFinite(r) || r < m.range_min || r > m.range_max) return
-      const a = m.angle_min + i * m.angle_increment
-      const px = Math.cos(a) * r * scale
-      const py = -Math.sin(a) * r * scale
-      ctx.beginPath(); ctx.arc(px, py, 1.5, 0, Math.PI*2); ctx.fill()
+  // Point-LIO — /cloud_registered top-down projection (camera_init frame)
+  if (S.lidar && S.lidar.data) {
+    const pts   = decodePC2xy(S.lidar)
+    const scale = 20   // px per metre — zoom in/out here
+    ctx.fillStyle = 'rgba(77,159,255,.65)'
+    pts.forEach(p => {
+      const px = cx + p.x * scale
+      const py = cy - p.y * scale
+      ctx.fillRect(px - 1, py - 1, 2, 2)
     })
-    ctx.restore()
-
-    // robot marker
-    ctx.beginPath(); ctx.arc(ox, oy, 7, 0, Math.PI*2)
-    ctx.fillStyle = '#4d9fff'; ctx.fill()
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
-    // heading ray
-    const ra = theta - Math.PI/2
-    ctx.beginPath(); ctx.moveTo(ox,oy)
-    ctx.lineTo(ox+Math.cos(ra)*20, oy+Math.sin(ra)*20)
-    ctx.strokeStyle = '#f0a500'; ctx.lineWidth = 2; ctx.stroke()
+    $('sl-pts').textContent = S.lidar.width * (S.lidar.height || 1)
   } else {
-    ctx.fillStyle = '#3a4050'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'
-    ctx.fillText('Waiting for /scan topic…', cx, cy+20)
+    ctx.fillStyle = '#2a3040'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center'
+    ctx.fillText('Waiting for /cloud_registered…', cx, cy - 10)
+    ctx.fillStyle = '#3a4050'; ctx.font = '11px sans-serif'
+    ctx.fillText('Launch: ros2 launch point_lio mapping_unilidar_l2.launch.py', cx, cy + 14)
   }
+
+  // Robot pose marker (from TF camera_init → aft_mapped)
+  const rx = cx + S.slamPose.x * 20
+  const ry = cy - S.slamPose.y * 20
+  ctx.beginPath(); ctx.arc(rx, ry, 7, 0, Math.PI*2)
+  ctx.fillStyle = '#4d9fff'; ctx.fill()
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
+  // heading ray
+  const ra = S.slamPose.theta * DEG - Math.PI / 2
+  ctx.beginPath(); ctx.moveTo(rx, ry)
+  ctx.lineTo(rx + Math.cos(ra) * 20, ry + Math.sin(ra) * 20)
+  ctx.strokeStyle = '#f0a500'; ctx.lineWidth = 2; ctx.stroke()
 }
 
 // Test pattern for cameras without a live feed
