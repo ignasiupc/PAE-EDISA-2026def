@@ -5,7 +5,7 @@ slam_toolbox:
     odom_frame:  odom
     map_frame:   map
     base_frame:  base_link
-    scan_topic:  /scan
+    scan_topic:  /scan          # pointcloud_to_laserscan publica aquí
     mode:        mapping        # mapping | localization
 
     # ── Solver ───────────────────────────────────────────────

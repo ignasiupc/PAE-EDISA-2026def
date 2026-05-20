@@ -8,10 +8,10 @@
 #   ./slam_launch.sh --lidar ydlidar        # YDLIDAR X4/G4
 #   ./slam_launch.sh --map /tmp/my_map      # load existing map (localization mode)
 
-LIDAR="rplidar"
+LIDAR="unitree"
 PORT="/dev/ttyUSB0"
 BAUD=115200
-FRAME="laser"
+FRAME="unilidar_lidar"   # frame del L1 (cambia a "laser" si usas RPLiDAR)
 MAP_FILE=""
 PARAMS_DIR="$(dirname "$(realpath "$0")")"
 
@@ -34,7 +34,37 @@ sudo chmod 666 "$PORT" 2>/dev/null || true
 echo "[SLAM] driver=$LIDAR  port=$PORT  baud=$BAUD"
 
 # ── LiDAR driver ──────────────────────────────────────────────────────────────
-if [ "$LIDAR" = "rplidar" ]; then
+if [ "$LIDAR" = "unitree" ]; then
+  # Unitree L1 4D — conecta por Ethernet (Pi: 192.168.1.50, LiDAR: 192.168.1.62)
+  # Asegura IP en la interfaz ethernet (ajusta eth0 si es otro nombre)
+  sudo ip addr add 192.168.1.50/24 dev eth0 2>/dev/null || true
+
+  source ~/unitree_lidar_ros2/install/setup.bash 2>/dev/null || true
+
+  ros2 launch unitree_lidar_ros2 launch.py &
+  LIDAR_PID=$!
+  sleep 3
+
+  # Convierte PointCloud2 (/unilidar/cloud) → LaserScan (/scan) para SLAM Toolbox
+  # Corte horizontal ±5 cm alrededor del plano del LiDAR
+  ros2 run pointcloud_to_laserscan pointcloud_to_laserscan_node \
+    --ros-args \
+    -r __ns:=/ \
+    -r /cloud_in:=/unilidar/cloud \
+    -p target_frame:=unilidar_lidar \
+    -p transform_tolerance:=0.01 \
+    -p min_height:=-0.05 \
+    -p max_height:=0.05 \
+    -p angle_min:=-3.14159 \
+    -p angle_max:=3.14159 \
+    -p angle_increment:=0.00872 \
+    -p scan_time:=0.033 \
+    -p range_min:=0.1 \
+    -p range_max:=30.0 \
+    -p use_inf:=true &
+  PC2LS_PID=$!
+
+elif [ "$LIDAR" = "rplidar" ]; then
   ros2 run rplidar_ros rplidar_composition \
     --ros-args \
     -p serial_port:="$PORT" \
@@ -65,6 +95,23 @@ else
 fi
 
 sleep 2
+
+# ── TF estáticos ─────────────────────────────────────────────────────────────
+# base_link → frame del LiDAR (ajusta x y z a la posición física en el dron)
+ros2 run tf2_ros static_transform_publisher \
+  --frame-id base_link --child-frame-id "$FRAME" \
+  --x 0 --y 0 --z 0.1 --roll 0 --pitch 0 --yaw 0 &
+TF_SENSOR_PID=$!
+
+# odom → base_link: usa MAVROS si está activo; si no (prueba en banco),
+# publica un TF estático (el dron "no se mueve" en odom pero SLAM compensa con scan matching)
+if ! ros2 topic list 2>/dev/null | grep -q "/mavros/local_position/odom"; then
+  echo "[SLAM] MAVROS no detectado — usando TF estático odom→base_link (prueba en tierra)"
+  ros2 run tf2_ros static_transform_publisher \
+    --frame-id odom --child-frame-id base_link \
+    --x 0 --y 0 --z 0 --roll 0 --pitch 0 --yaw 0 &
+  TF_ODOM_PID=$!
+fi
 
 # ── SLAM Toolbox ──────────────────────────────────────────────────────────────
 if [ -n "$MAP_FILE" ]; then
