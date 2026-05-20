@@ -1236,7 +1236,7 @@ function drawTestPattern (canvasId, hue) {
 function resizeCanvases () {
   const ro = new ResizeObserver(() => {
     ;['cam1','icam1','icam2','horizon-canvas','compass-canvas',
-      'chart-alt','chart-spd','chart-vspd'].forEach(id => {
+      'chart-alt','chart-spd','chart-vspd','hex-diagram'].forEach(id => {
       const c = $(id)
       if (!c || !c.parentElement) return
       const p = c.parentElement
@@ -1246,7 +1246,7 @@ function resizeCanvases () {
     drawMap()
     drawSLAM()
   })
-  ;['cam-col','img-left','img-cams','nav-top','nav-charts','slam-main'].forEach(id => {
+  ;['cam-col','img-left','img-cams','nav-top','nav-charts','slam-main','hex-block'].forEach(id => {
     const el = $(id)
     if (el) ro.observe(el)
   })
