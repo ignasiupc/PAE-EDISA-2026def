@@ -384,6 +384,11 @@ function initControls () {
   $('btn-slam-pause').addEventListener('click', () => slamToggle(false))
   $('btn-slam-save').addEventListener('click', slamSaveMap)
   $('btn-slam-reset').addEventListener('click', slamResetPose)
+  $('btn-slam-clear').addEventListener('click', () => {
+    SLAM3D.clearMap()
+    $('sl-pts').textContent = '0'
+    addCmdLog('Map cleared', 'ok')
+  })
 }
 
 // ── subscriptions ─────────────────────────────────────────────────────────────
@@ -463,11 +468,9 @@ function subscribe () {
 
   // Point-LIO — nube de puntos registrada (frame camera_init)
   sub('/cloud_registered', 'sensor_msgs/PointCloud2', m => {
-    S.lidar = m   // guardamos para drawSLAM
-    const pts = m.width * m.height
-    $('sl-pts').textContent  = pts
-    $('sl-minr').textContent  = '—'
-    $('sl-maxr').textContent  = '—'
+    const xyz = decodePC2xyz(m)
+    SLAM3D.addScan(xyz)
+    $('sl-pts').textContent   = SLAM3D.count.toLocaleString()
     $('sl-astep').textContent = '3D'
     $('sl-status').textContent = 'Active'
     $('sl-status').className   = 'sv ok'
@@ -483,23 +486,18 @@ function subscribe () {
     updateSlamPoseUI()
   })
 
-  // TF camera_init → aft_mapped (fuente principal de pose en Point-LIO)
-  try {
-    const tfClient = new ROSLIB.TFClient({
-      ros,
-      fixedFrame: 'camera_init',
-      angularThres: 0.01,
-      transThres:   0.01,
-      rate:         10.0,
-    })
-    tfClient.subscribe('aft_mapped', tf => {
-      S.slamPose.x = tf.translation.x
-      S.slamPose.y = tf.translation.y
-      const q = tf.rotation
-      S.slamPose.theta = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z)) * R2D
-      updateSlamPoseUI()
-    })
-  } catch (_) {}
+  // Point-LIO pose via /tf topic — subscribe directly, no tf2_web_republisher needed
+  sub('/tf', 'tf2_msgs/TFMessage', m => {
+    const tr = (m.transforms || []).find(t =>
+      t.header.frame_id === 'camera_init' && t.child_frame_id === 'aft_mapped')
+    if (!tr) return
+    const p = tr.transform.translation
+    S.slamPose.x = p.x
+    S.slamPose.y = p.y
+    const q = tr.transform.rotation
+    S.slamPose.theta = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z)) * R2D
+    updateSlamPoseUI()
+  })
 
   // Barcode detection (std_msgs/String carrying JSON or plain barcode string)
   sub('/barcode/detection', 'std_msgs/String', m => {
@@ -1129,84 +1127,235 @@ function updateSlamPoseUI () {
   $('sl-theta').textContent = fmt1(S.slamPose.theta) + '°'
 }
 
-// Decode PointCloud2 binary data → array of {x,y} for top-down 2D projection
-function decodePC2xy (msg) {
+// Decode PointCloud2 binary → packed Float32Array [x,y,z, x,y,z, ...] — no subsampling
+function decodePC2xyz (msg) {
   const raw = atob(msg.data)
   const buf = new Uint8Array(raw.length)
   for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i)
-
-  let xOff = 0, yOff = 4
-  if (msg.fields) {
-    msg.fields.forEach(f => {
-      if (f.name === 'x') xOff = f.offset
-      if (f.name === 'y') yOff = f.offset
-    })
-  }
-
-  const step = msg.point_step || 16
+  let xOff = 0, yOff = 4, zOff = 8
+  if (msg.fields) msg.fields.forEach(f => {
+    if (f.name === 'x') xOff = f.offset
+    if (f.name === 'y') yOff = f.offset
+    if (f.name === 'z') zOff = f.offset
+  })
+  const step = msg.point_step || 26
   const count = (msg.width || 0) * (msg.height || 1)
   const le = !msg.is_bigendian
-  const view = new DataView(buf.buffer)
-  const pts = []
-  // Subsample to max 4000 points for canvas performance
-  const stride = Math.max(1, Math.floor(count / 4000))
-  for (let i = 0; i < count; i += stride) {
-    const base = i * step
-    if (base + yOff + 4 > buf.length) break
-    const x = view.getFloat32(base + xOff, le)
-    const y = view.getFloat32(base + yOff, le)
-    if (isFinite(x) && isFinite(y) && (x !== 0 || y !== 0)) pts.push({ x, y })
+  const dv = new DataView(buf.buffer)
+  const out = new Float32Array(count * 3)
+  let n = 0
+  for (let i = 0; i < count; i++) {
+    const b = i * step
+    if (b + zOff + 4 > buf.length) break
+    const x = dv.getFloat32(b + xOff, le)
+    const y = dv.getFloat32(b + yOff, le)
+    const z = dv.getFloat32(b + zOff, le)
+    if (isFinite(x) && isFinite(y) && isFinite(z)) {
+      out[n++] = x; out[n++] = y; out[n++] = z
+    }
   }
-  return pts
+  return { data: out, count: n / 3 }
 }
+
+// ── SLAM 3D WebGL point-cloud renderer (Point-LIO / Unitree L2) ──────────────
+const SLAM3D = (() => {
+  const MAX = 800000   // ring-buffer capacity (~11 min at 1200 pts/s)
+  let gl = null, prog = null, bufPos = null, bufCol = null
+  let uMVP = -1, uSz = -1, aPos = -1, aCol = -1
+  const posArr = new Float32Array(MAX * 3)
+  const colArr = new Float32Array(MAX * 3)
+  let total = 0, ready = false
+
+  const cam = { theta: 0.4, phi: 0.42, dist: 12, tx: 0, ty: 0, tz: 0 }
+  let drag = null
+
+  const VS = `attribute vec3 aPos;attribute vec3 aCol;
+    uniform mat4 uMVP;uniform float uSz;varying vec3 vCol;
+    void main(){gl_Position=uMVP*vec4(aPos,1.);
+      gl_PointSize=max(1.,uSz/gl_Position.w);vCol=aCol;}`
+  const FS = `precision mediump float;varying vec3 vCol;
+    void main(){vec2 c=gl_PointCoord-.5;if(dot(c,c)>.25)discard;
+      gl_FragColor=vec4(vCol,1.);}`
+
+  function mkShader (src, type) {
+    const s = gl.createShader(type)
+    gl.shaderSource(s, src); gl.compileShader(s); return s
+  }
+
+  // RViz2-style rainbow: blue(low) → cyan → green → yellow → red(high)
+  function hcol (z) {
+    const t = Math.max(0, Math.min(1, (z + 0.5) / 3.0))
+    if (t < 0.25) return [0,        t * 4,          1]
+    if (t < 0.5)  return [0,        1,               1 - (t - 0.25) * 4]
+    if (t < 0.75) return [(t-0.5)*4, 1,              0]
+    return              [1,          1-(t-0.75)*4,   0]
+  }
+
+  function mul4 (A, B) {
+    const C = new Float32Array(16)
+    for (let c = 0; c < 4; c++)
+      for (let r = 0; r < 4; r++)
+        for (let k = 0; k < 4; k++) C[c*4+r] += A[k*4+r] * B[c*4+k]
+    return C
+  }
+
+  function persp (fov, asp, n, f) {
+    const t = 1 / Math.tan(fov / 2)
+    return new Float32Array([
+      t/asp, 0,  0,                    0,
+      0,     t,  0,                    0,
+      0,     0, (f+n)/(n-f),          -1,
+      0,     0, (2*f*n)/(n-f),         0,
+    ])
+  }
+
+  function lookAt (ex, ey, ez, tx, ty, tz) {
+    let fx=tx-ex, fy=ty-ey, fz=tz-ez
+    const fl = Math.hypot(fx,fy,fz)||1; fx/=fl; fy/=fl; fz/=fl
+    // right = cross(forward, Z-up) = [fy, -fx, 0]
+    let rx=fy, ry=-fx, rz=0
+    const rl = Math.hypot(rx,ry)||1; rx/=rl; ry/=rl
+    // true up = cross(right, forward)
+    const ux=ry*fz-rz*fy, uy=rz*fx-rx*fz, uz=rx*fy-ry*fx
+    return new Float32Array([
+      rx, ux, -fx, 0,  ry, uy, -fy, 0,  rz, uz, -fz, 0,
+      -(rx*ex+ry*ey+rz*ez), -(ux*ex+uy*ey+uz*ez), fx*ex+fy*ey+fz*ez, 1,
+    ])
+  }
+
+  function mvpMat (W, H) {
+    const cP = Math.cos(cam.phi), sP = Math.sin(cam.phi)
+    const cT = Math.cos(cam.theta), sT = Math.sin(cam.theta)
+    const ex = cam.tx + cam.dist * cP * cT
+    const ey = cam.ty + cam.dist * cP * sT
+    const ez = cam.tz + cam.dist * sP
+    return mul4(persp(60*DEG, W/H, 0.05, 500), lookAt(ex,ey,ez, cam.tx,cam.ty,cam.tz))
+  }
+
+  function init (canvas) {
+    if (ready) return true
+    gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl')
+    if (!gl) return false
+    prog = gl.createProgram()
+    gl.attachShader(prog, mkShader(VS, gl.VERTEX_SHADER))
+    gl.attachShader(prog, mkShader(FS, gl.FRAGMENT_SHADER))
+    gl.linkProgram(prog); gl.useProgram(prog)
+    bufPos = gl.createBuffer(); bufCol = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufPos)
+    gl.bufferData(gl.ARRAY_BUFFER, posArr, gl.DYNAMIC_DRAW)
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufCol)
+    gl.bufferData(gl.ARRAY_BUFFER, colArr, gl.DYNAMIC_DRAW)
+    uMVP = gl.getUniformLocation(prog, 'uMVP')
+    uSz  = gl.getUniformLocation(prog, 'uSz')
+    aPos = gl.getAttribLocation(prog,  'aPos')
+    aCol = gl.getAttribLocation(prog,  'aCol')
+    gl.enableVertexAttribArray(aPos)
+    gl.enableVertexAttribArray(aCol)
+    gl.enable(gl.DEPTH_TEST)
+    gl.clearColor(0.04, 0.055, 0.078, 1)
+
+    canvas.addEventListener('mousedown', e => { drag = { x: e.clientX, y: e.clientY, btn: e.button } })
+    window.addEventListener('mouseup', () => { drag = null })
+    canvas.addEventListener('mousemove', e => {
+      if (!drag) return
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y
+      if (drag.btn === 0) {
+        cam.theta -= dx * 0.006
+        cam.phi = Math.max(-1.4, Math.min(1.4, cam.phi - dy * 0.006))
+      } else {
+        const s = cam.dist * 0.0015
+        cam.tx -= dx * s * Math.cos(cam.theta)
+        cam.ty -= dx * s * Math.sin(cam.theta)
+        cam.tz += dy * s
+      }
+      drag.x = e.clientX; drag.y = e.clientY
+    })
+    canvas.addEventListener('wheel', e => {
+      cam.dist = Math.max(0.3, Math.min(300, cam.dist * (1 + e.deltaY * 0.001)))
+      e.preventDefault()
+    }, { passive: false })
+    canvas.addEventListener('contextmenu', e => e.preventDefault())
+    ready = true; return true
+  }
+
+  function addScan (scan) {
+    // Always accumulate into CPU arrays (even before WebGL is ready)
+    for (let i = 0; i < scan.count; i++) {
+      const slot = (total % MAX) * 3
+      const si   = i * 3
+      posArr[slot]   = scan.data[si]
+      posArr[slot+1] = scan.data[si+1]
+      posArr[slot+2] = scan.data[si+2]
+      const [r,g,b]  = hcol(scan.data[si+2])
+      colArr[slot] = r; colArr[slot+1] = g; colArr[slot+2] = b
+      total++
+    }
+    // Upload to GPU only if WebGL context exists
+    if (!ready) return
+    const used = Math.min(total, MAX) * 3
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufPos)
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, posArr.subarray(0, used))
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufCol)
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, colArr.subarray(0, used))
+  }
+
+  function render (canvas) {
+    if (!ready) return
+    const W = canvas.width, H = canvas.height
+    if (W < 2 || H < 2) return
+    gl.viewport(0, 0, W, H)
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+    const used = Math.min(total, MAX)
+    if (used === 0) return
+    gl.uniformMatrix4fv(uMVP, false, mvpMat(W, H))
+    gl.uniform1f(uSz, Math.max(2, 60 / cam.dist))
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufPos)
+    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0)
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufCol)
+    gl.vertexAttribPointer(aCol, 3, gl.FLOAT, false, 0, 0)
+    gl.drawArrays(gl.POINTS, 0, used)
+  }
+
+  function clearMap () {
+    total = 0
+    posArr.fill(0); colArr.fill(0)
+    if (ready) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufPos); gl.bufferData(gl.ARRAY_BUFFER, posArr, gl.DYNAMIC_DRAW)
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufCol); gl.bufferData(gl.ARRAY_BUFFER, colArr, gl.DYNAMIC_DRAW)
+    }
+  }
+
+  return { init, addScan, render, clearMap, cam, get count () { return Math.min(total, MAX) } }
+})()
 
 function drawSLAM () {
   const canvas = $('slam-canvas')
   const wrap   = $('slam-main')
   if (!canvas || !wrap) return
+
+  // Resize only when container dimensions change
   const W = wrap.clientWidth, H = wrap.clientHeight - 26
-  if (W < 10 || H < 10) return
-  canvas.width = W; canvas.height = H
-  const ctx = canvas.getContext('2d')
-
-  ctx.fillStyle = '#0a0e14'; ctx.fillRect(0,0,W,H)
-
-  const cx = W/2, cy = H/2
-
-  // Background grid
-  ctx.strokeStyle = '#162030'; ctx.lineWidth = 1
-  for (let x = 0; x < W; x += 30) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke() }
-  for (let y = 0; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke() }
-
-  // Point-LIO — /cloud_registered top-down projection (camera_init frame)
-  if (S.lidar && S.lidar.data) {
-    const pts   = decodePC2xy(S.lidar)
-    const scale = 20   // px per metre — zoom in/out here
-    ctx.fillStyle = 'rgba(77,159,255,.65)'
-    pts.forEach(p => {
-      const px = cx + p.x * scale
-      const py = cy - p.y * scale
-      ctx.fillRect(px - 1, py - 1, 2, 2)
-    })
-    $('sl-pts').textContent = S.lidar.width * (S.lidar.height || 1)
-  } else {
-    ctx.fillStyle = '#2a3040'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center'
-    ctx.fillText('Waiting for /cloud_registered…', cx, cy - 10)
-    ctx.fillStyle = '#3a4050'; ctx.font = '11px sans-serif'
-    ctx.fillText('Launch: ros2 launch point_lio mapping_unilidar_l2.launch.py', cx, cy + 14)
+  if (W < 2 || H < 2) return
+  if (canvas.width !== W || canvas.height !== H) {
+    canvas.width = W; canvas.height = H
   }
 
-  // Robot pose marker (from TF camera_init → aft_mapped)
-  const rx = cx + S.slamPose.x * 20
-  const ry = cy - S.slamPose.y * 20
-  ctx.beginPath(); ctx.arc(rx, ry, 7, 0, Math.PI*2)
-  ctx.fillStyle = '#4d9fff'; ctx.fill()
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
-  // heading ray
-  const ra = S.slamPose.theta * DEG - Math.PI / 2
-  ctx.beginPath(); ctx.moveTo(rx, ry)
-  ctx.lineTo(rx + Math.cos(ra) * 20, ry + Math.sin(ra) * 20)
-  ctx.strokeStyle = '#f0a500'; ctx.lineWidth = 2; ctx.stroke()
+  if (!SLAM3D.init(canvas)) return   // fallback if no WebGL
+
+  SLAM3D.render(canvas)
+
+  // Overlay: pose + instructions via 2D canvas on top if no points yet
+  if (SLAM3D.count === 0) {
+    const ctx2 = canvas.getContext('2d')
+    if (ctx2) {
+      ctx2.fillStyle = 'rgba(42,48,64,.85)'
+      ctx2.fillRect(W/2-200, H/2-30, 400, 60)
+      ctx2.fillStyle = '#5a6072'; ctx2.font = '13px sans-serif'; ctx2.textAlign = 'center'
+      ctx2.fillText('Waiting for /cloud_registered…', W/2, H/2-8)
+      ctx2.fillStyle = '#3a4050'; ctx2.font = '11px sans-serif'
+      ctx2.fillText('ros2 launch point_lio mapping_unilidar_l2.launch.py', W/2, H/2+14)
+    }
+  }
 }
 
 // Test pattern for cameras without a live feed
