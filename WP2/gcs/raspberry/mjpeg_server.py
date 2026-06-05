@@ -34,6 +34,8 @@ def gen_frames():
         ret, frame = cap.read()
         if not ret:
             continue
+        # V4L2 on RPi Camera returns RGB-ordered data despite cv2 expecting BGR — swap
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         _, buf = cv2.imencode('.jpg', frame, encode_params)
         yield (
             b'--frame\r\n'

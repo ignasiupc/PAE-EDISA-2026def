@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Start rosbridge (WebSocket ↔ ROS2) + camera publisher on the Raspberry Pi.
-# Usage:  ./start_gcs.sh [camera_device] [width] [height] [fps]
-# Example: ./start_gcs.sh 0 640 480 30
+# Usage:  ./start_gcs.sh [camera_device] [width] [height] [fps] [brain:0|1]
+# Example: ./start_gcs.sh 0 640 480 30 1   ← enable brain/mission node
 
 DEVICE=${1:-0}
 WIDTH=${2:-640}
 HEIGHT=${3:-480}
 FPS=${4:-30}
+BRAIN=${5:-0}
 TOPIC="/camera/forward/image_raw/compressed"
 
 # Source ROS2 (adjust distro name if needed: humble / iron / jazzy)
@@ -30,9 +31,17 @@ python3 "$(dirname "$0")/camera_publisher.py" \
   -p jpeg_quality:=80 &
 CAM_PID=$!
 
+BRAIN_PID=""
+if [ "$BRAIN" = "1" ]; then
+  echo "[GCS] Starting brain node (autonomous mission planner)..."
+  python3 "$(dirname "$0")/brain_node.py" &
+  BRAIN_PID=$!
+  echo "      Brain PID=$BRAIN_PID  DB=~/brain_data.db"
+fi
+
 echo "[GCS] Running — bridge PID=$BRIDGE_PID  cam PID=$CAM_PID"
 echo "      Connect GCS to ws://$(hostname -I | awk '{print $1}'):9090"
 echo "      Press Ctrl+C to stop."
 
-trap "kill $BRIDGE_PID $CAM_PID 2>/dev/null" EXIT INT TERM
+trap "kill $BRIDGE_PID $CAM_PID $BRAIN_PID 2>/dev/null" EXIT INT TERM
 wait

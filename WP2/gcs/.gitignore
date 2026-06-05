@@ -1,2 +1,13 @@
 node_modules/
 dist/
+docs/node_modules/
+docs/package-lock.json
+docs/screenshots/
+docs/slide_preview/
+docs/~$*
+*.pyc
+__pycache__/
+*.log
+gcs_logs/
+brain_data.db
+PCD/
