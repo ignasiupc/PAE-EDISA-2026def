@@ -49,6 +49,14 @@ A drone equipped with a LiDAR sensor, camera, and onboard computer flies autonom
 
 ---
 
+## Video Demo
+
+<p align="center">
+  <video src="WP2/gcs/docs/assets/demo.mp4" controls width="100%"></video>
+</p>
+
+---
+
 ## Screenshots
 
 <p align="center">
@@ -92,3 +100,22 @@ npm start
 UPC — Universitat Politècnica de Catalunya  
 PAE (Projecte d'Aplicació a l'Empresa) 2025–2026  
 Client: EDISA
+
+---
+
+## Contributors
+
+**Students**
+
+| | | |
+|---|---|---|
+| Aaron Noguera | Aitor Pitarch | Alejandro de Alvarado |
+| Alejandro Jové | Clara Jorba | Ignacio Blasi |
+| Ignasi Fernández | Jaqueline Khalioulline | Lluís Estapé |
+| Diego Rivas | Marc Elvira | Pablo Sánchez |
+| Patricia Ballester | Samantha Wroblewski | |
+
+**Professors**
+
+| Elisa Sayrol | Javier Ruiz-Hidalgo |
+|---|---|
