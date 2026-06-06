@@ -11,7 +11,7 @@ BRAIN=${5:-0}
 TOPIC="/camera/forward/image_raw/compressed"
 
 # Source ROS2 (adjust distro name if needed: humble / iron / jazzy)
-source /opt/ros/humble/setup.bash
+source /opt/ros/${ROS_DISTRO:-jazzy}/setup.bash
 
 echo "[GCS] Starting rosbridge on port 9090..."
 ros2 launch rosbridge_server rosbridge_websocket_launch.xml &

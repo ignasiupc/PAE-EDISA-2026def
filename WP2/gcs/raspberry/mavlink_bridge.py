@@ -33,11 +33,13 @@ from pymavlink import mavutil
 
 BAUD_RATE   = int(os.environ.get('MAV_BAUD', '57600'))
 
-# Auto-detect serial port: env var → /dev/serial0 (symlink) → /dev/ttyAMA0 → /dev/ttyAMA10 → /dev/ttyUSB0
+# Auto-detect serial port: env var → /dev/serial0 (symlink) → /dev/ttyAMA10 (RPi5 GPIO) → /dev/ttyAMA0 → /dev/ttyUSB0
+# NOTE: ttyAMA10 intentionally precedes ttyAMA0 — on RPi5, ttyAMA0 may be mapped
+# to the Bluetooth chip (RP1), not to the GPIO 14/15 UART.
 def _find_serial_port():
     if 'MAV_PORT' in os.environ:
         return os.environ['MAV_PORT']
-    candidates = ['/dev/serial0', '/dev/ttyAMA0', '/dev/ttyAMA10', '/dev/ttyUSB0', '/dev/ttyACM0']
+    candidates = ['/dev/serial0', '/dev/ttyAMA10', '/dev/ttyAMA0', '/dev/ttyUSB0', '/dev/ttyACM0']
     for p in candidates:
         if os.path.exists(p):
             return p
@@ -77,8 +79,12 @@ class MavlinkBridge(Node):
         self._mode      = '—'
         self._connected = False
 
-        # 1 Hz state publisher
+        # Lock protecting all MAVLink send operations (recv runs in its own thread)
+        self._mav_lock  = threading.Lock()
+
+        # 1 Hz state publisher + 1 Hz GCS heartbeat to Pixhawk
         self.create_timer(1.0, self._publish_state)
+        self.create_timer(1.0, self._send_heartbeat)
 
         # MAVLink reader in background thread
         threading.Thread(target=self._mav_loop, daemon=True).start()
@@ -88,6 +94,14 @@ class MavlinkBridge(Node):
     def _mav_loop(self):
         while rclpy.ok():
             try:
+                # F-12: close previous connection explicitly before opening a new one
+                if self._mav is not None:
+                    try:
+                        self._mav.close()
+                    except Exception:
+                        pass
+                    self._mav = None
+
                 self.get_logger().info(f'Connecting to Pixhawk on {SERIAL_PORT}…')
                 self._mav = mavutil.mavlink_connection(
                     SERIAL_PORT, baud=BAUD_RATE, source_system=255)
@@ -116,16 +130,32 @@ class MavlinkBridge(Node):
                 time.sleep(5)
 
     def _request_streams(self):
-        m = self._mav
-        for sid, rate in [
-            (mavutil.mavlink.MAV_DATA_STREAM_ALL,        4),
-            (mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,    10),   # ATTITUDE
-            (mavutil.mavlink.MAV_DATA_STREAM_EXTRA2,     4),   # VFR_HUD
-            (mavutil.mavlink.MAV_DATA_STREAM_POSITION,   5),   # GPS
-            (mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 4),  # RC/SERVO
-        ]:
-            m.mav.request_data_stream_send(
-                m.target_system, m.target_component, sid, rate, 1)
+        with self._mav_lock:
+            m = self._mav
+            if m is None:
+                return
+            for sid, rate in [
+                (mavutil.mavlink.MAV_DATA_STREAM_ALL,        4),
+                (mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,    10),   # ATTITUDE
+                (mavutil.mavlink.MAV_DATA_STREAM_EXTRA2,     4),   # VFR_HUD
+                (mavutil.mavlink.MAV_DATA_STREAM_POSITION,   5),   # GPS
+                (mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 4),  # RC/SERVO
+            ]:
+                m.mav.request_data_stream_send(
+                    m.target_system, m.target_component, sid, rate, 1)
+
+    # ── F-08: 1 Hz GCS heartbeat → keeps ArduCopter streaming ────────────────
+    def _send_heartbeat(self):
+        with self._mav_lock:
+            if self._mav is None or not self._connected:
+                return
+            try:
+                self._mav.mav.heartbeat_send(
+                    mavutil.mavlink.MAV_TYPE_GCS,
+                    mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                    0, 0, 0)
+            except Exception as e:
+                self.get_logger().debug(f'heartbeat_send error: {e}')
 
     # ── message dispatcher ────────────────────────────────────────────────────
     def _handle(self, msg):
@@ -217,45 +247,49 @@ class MavlinkBridge(Node):
             return
 
         action = d.get('action', '')
-        m      = self._mav
 
-        if action == 'arm':
-            m.mav.command_long_send(
-                m.target_system, m.target_component,
-                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-                0, 1, 0, 0, 0, 0, 0, 0)
-            self.get_logger().info('ARM sent')
+        with self._mav_lock:
+            m = self._mav
+            if m is None:
+                return
 
-        elif action == 'disarm':
-            m.mav.command_long_send(
-                m.target_system, m.target_component,
-                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-                0, 0, 0, 0, 0, 0, 0, 0)
-            self.get_logger().info('DISARM sent')
+            if action == 'arm':
+                m.mav.command_long_send(
+                    m.target_system, m.target_component,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0, 1, 0, 0, 0, 0, 0, 0)
+                self.get_logger().info('ARM sent')
 
-        elif action == 'mode':
-            name    = d.get('mode', 'LOITER').upper()
-            mode_id = MODE_MAP.get(name, 5)
-            m.mav.set_mode_send(
-                m.target_system,
-                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                mode_id)
-            self.get_logger().info(f'SET_MODE {name} ({mode_id})')
+            elif action == 'disarm':
+                m.mav.command_long_send(
+                    m.target_system, m.target_component,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0, 0, 0, 0, 0, 0, 0, 0)
+                self.get_logger().info('DISARM sent')
 
-        elif action == 'takeoff':
-            alt = float(d.get('alt', 5.0))
-            m.mav.command_long_send(
-                m.target_system, m.target_component,
-                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
-                0, 0, 0, 0, 0, 0, 0, alt)
-            self.get_logger().info(f'TAKEOFF {alt} m')
+            elif action == 'mode':
+                name    = d.get('mode', 'LOITER').upper()
+                mode_id = MODE_MAP.get(name, 5)
+                m.mav.set_mode_send(
+                    m.target_system,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    mode_id)
+                self.get_logger().info(f'SET_MODE {name} ({mode_id})')
 
-        elif action == 'land':
-            m.mav.command_long_send(
-                m.target_system, m.target_component,
-                mavutil.mavlink.MAV_CMD_NAV_LAND,
-                0, 0, 0, 0, 0, 0, 0, 0)
-            self.get_logger().info('LAND sent')
+            elif action == 'takeoff':
+                alt = float(d.get('alt', 5.0))
+                m.mav.command_long_send(
+                    m.target_system, m.target_component,
+                    mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                    0, 0, 0, 0, 0, 0, 0, alt)
+                self.get_logger().info(f'TAKEOFF {alt} m')
+
+            elif action == 'land':
+                m.mav.command_long_send(
+                    m.target_system, m.target_component,
+                    mavutil.mavlink.MAV_CMD_NAV_LAND,
+                    0, 0, 0, 0, 0, 0, 0, 0)
+                self.get_logger().info('LAND sent')
 
 
 def main():
