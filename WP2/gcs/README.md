@@ -92,33 +92,65 @@ The most operationally valuable module. The `barcode_detector.py` node subscribe
 
 ## System Architecture
 
-```
-┌─────────────────────────────── DRONE ──────────────────────────────────┐
-│                                                                         │
-│  ┌──────────────┐   Ethernet    ┌──────────────────────────────────┐   │
-│  │  Unitree 4D  │──────────────▶│                                  │   │
-│  │  LiDAR       │               │          Raspberry Pi 5          │   │
-│  └──────────────┘               │          ROS2 Jazzy              │   │
-│                                 │                                  │   │
-│  ┌──────────────┐   CSI / USB   │  • gcs_control.py  (manager)    │   │
-│  │  Pi Camera   │──────────────▶│  • camera_publisher.py          │   │
-│  └──────────────┘               │  • mjpeg_server.py              │   │
-│                                 │  • barcode_detector.py          │   │
-│  ┌──────────────┐   UART TX/RX  │  • mavlink_bridge.py            │   │
-│  │  Pixhawk FC  │──────────────▶│  • brain_node.py                │   │
-│  │  ArduCopter  │               │  • slam_launch.sh               │   │
-│  └──────────────┘               │    └─ unitree_lidar_ros2        │   │
-│                                 │    └─ Point-LIO                 │   │
-│                                 │  • rosbridge_server  :9090      │   │
-│                                 └──────────────┬───────────────────┘   │
-└────────────────────────────────────────────────│────────────────────────┘
-                                                 │ Wi-Fi  (WebSocket)
-                              ┌──────────────────▼───────────────────┐
-                              │         GCS Laptop                   │
-                              │         Electron App                 │
-                              │  Dashboard · Navigation · SLAM       │
-                              │  Image Processing · Inventory DB     │
-                              └──────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph DRONE["🚁  DRONE"]
+        direction LR
+
+        subgraph SENSORS["Sensors"]
+            direction TB
+            LiDAR["📡 Unitree 4D LiDAR"]
+            CAM["📷 Pi Camera Module"]
+            PX["🎮 Pixhawk FC · ArduCopter"]
+        end
+
+        subgraph PI["🍓  Raspberry Pi 5  ·  ROS2 Jazzy"]
+            direction LR
+            GCS_C["⚙️ gcs_control.py\nservice manager"]
+            CAM_P["📷 camera_publisher.py\npicamera2"]
+            MJPEG["🎥 mjpeg_server.py\nFlask :8080"]
+            BAR["📦 barcode_detector.py\npyzbar + OpenCV"]
+            MAV["🔌 mavlink_bridge.py\npymavlink"]
+            BRAIN["🧠 brain_node.py\nmission planner"]
+            SLAM["🗺️ slam_launch.sh\nPoint-LIO + Unitree"]
+            RB["🌐 rosbridge_server\n:9090"]
+        end
+
+        LiDAR -- "Ethernet eth0" --> PI
+        CAM   -- "CSI"           --> PI
+        PX    -- "UART 57600"    --> PI
+    end
+
+    subgraph GCS["💻  GCS Laptop  ·  Electron"]
+        direction LR
+        DASH["🖥️ Dashboard\nARM · Camera · Map"]
+        NAV["🧭 Navigation\nIMU · GPS · Charts"]
+        SLAMV["🗺️ SLAM\n3D Point Cloud"]
+        IMGP["📦 Image Processing\nInventory · Barcodes"]
+    end
+
+    RB    -- "Wi-Fi · WebSocket :9090" --> GCS
+    MJPEG -. "MJPEG HTTP :8080" .->      DASH
+
+    style DRONE  fill:#1B3D6F18,stroke:#1B3D6F,stroke-width:2px,color:#ccc
+    style SENSORS fill:#ffffff08,stroke:#555,stroke-dasharray:4,color:#aaa
+    style PI     fill:#0D1B2Aaa,stroke:#4FC3F7,stroke-width:1.5px,color:#fff
+    style GCS    fill:#0D2A1Aaa,stroke:#64D2A4,stroke-width:2px,color:#fff
+    style GCS_C  fill:#1B3D6F,stroke:#4FC3F7,color:#fff
+    style CAM_P  fill:#1B3D6F,stroke:#4FC3F7,color:#fff
+    style MJPEG  fill:#1B3D6F,stroke:#4FC3F7,color:#fff
+    style BAR    fill:#1B3D6F,stroke:#4FC3F7,color:#fff
+    style MAV    fill:#1B3D6F,stroke:#4FC3F7,color:#fff
+    style BRAIN  fill:#1B3D6F,stroke:#4FC3F7,color:#fff
+    style SLAM   fill:#1B3D6F,stroke:#4FC3F7,color:#fff
+    style RB     fill:#0A4A6E,stroke:#4FC3F7,stroke-width:2px,color:#fff
+    style DASH   fill:#0E4A1A,stroke:#64D2A4,color:#fff
+    style NAV    fill:#0E4A1A,stroke:#64D2A4,color:#fff
+    style SLAMV  fill:#0E4A1A,stroke:#64D2A4,color:#fff
+    style IMGP   fill:#0E4A1A,stroke:#64D2A4,color:#fff
+    style LiDAR  fill:#2C3E50,stroke:#7F8C8D,color:#ddd
+    style CAM    fill:#2C3E50,stroke:#7F8C8D,color:#ddd
+    style PX     fill:#2C3E50,stroke:#7F8C8D,color:#ddd
 ```
 
 ---
