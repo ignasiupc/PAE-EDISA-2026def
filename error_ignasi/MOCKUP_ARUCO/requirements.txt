@@ -1,8 +1,0 @@
-# Dependencias principales de detector_3d.py
-
-opencv-contrib-python>=4.8.0
-numpy>=1.24.0
-matplotlib>=3.7.0
-
-# Opcional si amplias el proyecto con analisis de logs:
-# pandas>=2.0.0
